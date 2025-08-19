@@ -2,6 +2,7 @@
 
 # dependencies
 /node_modules
+.node_modules
 /.pnp
 .pnp.*
 .yarn/*
@@ -16,6 +17,7 @@
 # next.js
 /.next/
 /out/
+/node_modules/
 
 # production
 /build
@@ -39,3 +41,17 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# local env files
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local   
+
+# local build artifacts
+dist
+build   
+
+# localstack
+.localstack.*
+.dist

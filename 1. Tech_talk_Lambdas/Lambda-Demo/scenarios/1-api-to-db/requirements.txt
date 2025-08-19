@@ -1,7 +1,4 @@
-#--trusted-host artifactory.gscorp.ad
-#--index-url https://${ARTIFACTORY_USER}:${ARTIFACTORY_PASS}@artifactory.gscorp.ad/artifactory/api/pypi/spv-commons-pypi-local/simple
-#spv-commons-logger==1.1.3
-#--extra-index-url https://${ARTIFACTORY_USER}:${ARTIFACTORY_PASS}@artifactory.gscorp.ad/artifactory/api/pypi/pypi/simple
+
 python-json-logger==2.0.7
 pytest==8.1.1
 pytest-mock==3.14.0

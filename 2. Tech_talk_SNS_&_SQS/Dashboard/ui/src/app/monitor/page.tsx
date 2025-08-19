@@ -24,6 +24,7 @@ import { PlayButton } from '../../components/PlayButton';
 import { ParsedTrace, parsedTraceFromHtml } from '../helpers/TraceHelpers';
 import { jsonToB64 } from '../helpers/JsonConverter';
 import { TopNav } from '@/components/TopNav';
+import { traceJsonToHtml, TraceResponse } from '../helpers/TraceToJsonHtml';
 
 export const API = process.env.NEXT_PUBLIC_API || 'http://localhost:4000';
 
@@ -70,10 +71,14 @@ type ReplenItem = {
 const field =
   'bg-slate-900/70 text-slate-100 placeholder:text-slate-500 border border-slate-800 rounded-md p-2 focus:outline-none focus:ring-1 focus:ring-slate-600';
 
-export async function fetchSafe<T>(url: string, init?: RequestInit): Promise<T> {
+export async function fetchSafe<T>(
+  url: string,
+  init?: RequestInit
+): Promise<T> {
   try {
     const res = await fetch(url, { ...init, cache: 'no-store' });
-    if (!res.ok) throw new Error(`${init?.method || 'GET'} ${url} => ${res.status}`);
+    if (!res.ok)
+      throw new Error(`${init?.method || 'GET'} ${url} => ${res.status}`);
     return res.json() as Promise<T>;
   } catch (e: any) {
     console.error('fetchSafe error:', url, e);
@@ -167,22 +172,27 @@ export default function MonitoringPage() {
   };
 
   // load one trace by CID into accordion
-  const showTrace = React.useCallback(async (cid: string) => {
-    if (!cid) return;
-    setActiveTab('traces');
-    setCidAndURL(cid);
-    setCidBadge(cid);
-    try {
-      const html = await fetchSafe<string>(
-        `${API}/trace?cid=${encodeURIComponent(cid)}`
-      );
-      setDetail(html || '');
-    } catch (e) {
-      setDetail(
-        `<em style="color:#f88">No pude cargar la traza para ${cid}</em>`
-      );
-    }
-  }, []);
+  const showTrace = React.useCallback(
+    async (cid: string) => {
+      if (!cid) return;
+      setActiveTab('traces');
+      setCidAndURL(cid);
+      setCidBadge(cid);
+      try {
+        // 👇 usa la ruta JSON del backend (NO /trace?cid=…)
+        const data = await fetchSafe<TraceResponse>(
+          `${API}/trace/${encodeURIComponent(cid)}`
+        );
+        setDetail(traceJsonToHtml(data)); // 👈 mantienes TraceAccordion sin tocar
+      } catch (e) {
+        console.log('Error loading trace for CID:', cid, e);
+        setDetail(
+          `<em style="color:#f88">No pude cargar la traza para ${cid}</em>`
+        );
+      }
+    },
+    [API]
+  );
 
   // Global refresh (overview)
   const refresh = React.useCallback(async () => {
@@ -289,7 +299,7 @@ export default function MonitoringPage() {
 
   return (
     <div className="min-h-screen bg-[linear-gradient(180deg,#0b1220,rgba(11,18,32,0.92))] text-slate-100 px-4 md:px-6 pb-8">
-      <TopNav title={<>Fanout &amp; SQS — Monitor</>}   />
+      <TopNav title={<>Fanout &amp; SQS — Monitor</>} />
 
       {/* Tabs */}
       <Tabs
@@ -300,7 +310,7 @@ export default function MonitoringPage() {
           if (v === 'overview') void refresh();
         }}
       >
-        <div className='flex items-center justify-between mb-4 mt-10'>
+        <div className="flex items-center justify-between mb-4 mt-10">
           <TabsList className="bg-slate-900/60 border border-slate-800">
             <TabsTrigger value="overview">Resumen</TabsTrigger>
             <TabsTrigger value="orders">Pedidos</TabsTrigger>

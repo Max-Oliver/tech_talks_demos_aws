@@ -188,7 +188,7 @@ export default function FanoutVisualizer() {
 
 
     if (cid && !payloadB64) {
-      const payload = fetchSafe(`${API}/api/trace/${cid}/published`);
+      const payload = fetchSafe(`${API}/trace/${cid}/published`);
       startReplay({ payload, auto: mode === 'auto', speedMs: speed });
     }
 
