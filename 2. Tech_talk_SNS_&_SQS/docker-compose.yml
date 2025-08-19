@@ -1,0 +1,21 @@
+# 1) docker-compose.yml
+version: '3.8'
+services:
+  localstack:
+    image: localstack/localstack:3
+    container_name: localstack
+    environment:
+      - SERVICES=s3,sqs,sns,lambda,logs,cloudwatch,cloudformation,iam
+      - AWS_DEFAULT_REGION=us-east-1
+      - DEBUG=1
+      - DOCKER_HOST=unix:///var/run/docker.sock
+    ports:
+      - '4566:4566'
+    volumes:
+      - '/var/run/docker.sock:/var/run/docker.sock'
+      - './.localstack:/var/lib/localstack'
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://localhost:4566/health']
+      interval: 10s
+      timeout: 5s
+      retries: 10

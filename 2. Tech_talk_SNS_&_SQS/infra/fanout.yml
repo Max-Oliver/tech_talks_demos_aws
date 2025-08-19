@@ -1,0 +1,157 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "SNS fanout -> SQS con filtros + Lambdas"
+
+Parameters:
+  CodeBucket:
+    Type: String
+    Default: cf-code
+
+Resources:
+  DemoTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: demo-fanout-topic
+
+  # Fulfillment
+  FulfillDLQ: { Type: AWS::SQS::Queue, Properties: { QueueName: demo-fulfill-sqs-dlq } }
+  FulfillQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: demo-fulfill-sqs
+      VisibilityTimeout: 30
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt FulfillDLQ.Arn
+        maxReceiveCount: 3
+
+  # Analytics
+  AnalyticsDLQ: { Type: AWS::SQS::Queue, Properties: { QueueName: demo-analytics-sqs-dlq } }
+  AnalyticsQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: demo-analytics-sqs
+      VisibilityTimeout: 30
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt AnalyticsDLQ.Arn
+        maxReceiveCount: 3
+
+  PolicyFulfill:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: [ !Ref FulfillQ ]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: "*"
+            Action: sqs:SendMessage
+            Resource: !GetAtt FulfillQ.Arn
+            Condition: { ArnEquals: { aws:SourceArn: !Ref DemoTopic } }
+
+  PolicyAnalytics:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: [ !Ref AnalyticsQ ]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: "*"
+            Action: sqs:SendMessage
+            Resource: !GetAtt AnalyticsQ.Arn
+            Condition: { ArnEquals: { aws:SourceArn: !Ref DemoTopic } }
+
+  SubFulfill:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref DemoTopic
+      Protocol: sqs
+      Endpoint: !GetAtt FulfillQ.Arn
+      RawMessageDelivery: true
+      FilterPolicy:
+        eventType: ["OrderPlaced","OrderUpdated"]
+
+  SubAnalytics:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref DemoTopic
+      Protocol: sqs
+      Endpoint: !GetAtt AnalyticsQ.Arn
+      RawMessageDelivery: true
+      FilterPolicy:
+        eventType: ["OrderPlaced","OrderShipped"]
+        priority: ["high"]
+
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: demo-fanout-lambda-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: lambda-logs-s3-sqs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [ logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents ]
+                Resource: "arn:aws:logs:*:*:*"
+              - Effect: Allow
+                Action: [ sqs:ReceiveMessage, sqs:DeleteMessage, sqs:GetQueueAttributes ]
+                Resource: "*"
+              - Effect: Allow
+                Action: [ s3:PutObject, s3:GetObject, s3:ListBucket ]
+                Resource: "*"
+
+  ProcFulfillment:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: demo-fanout-fulfillment
+      Runtime: python3.11
+      Handler: fulfillment_worker.handler
+      Role: !GetAtt LambdaRole.Arn
+      Timeout: 30
+      Environment:
+        Variables:
+          APP_NAME: fanout
+          DATA_BUCKET: demo-data
+          AWS_ENDPOINT_URL: http://localstack:4566
+      Code:
+        S3Bucket: !Ref CodeBucket
+        S3Key: fanout_fulfillment.zip
+
+  ProcAnalytics:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: demo-fanout-analytics
+      Runtime: python3.11
+      Handler: analytics_worker.handler
+      Role: !GetAtt LambdaRole.Arn
+      Timeout: 30
+      Environment:
+        Variables:
+          APP_NAME: fanout
+          DATA_BUCKET: demo-data
+          AWS_ENDPOINT_URL: http://localstack:4566
+      Code:
+        S3Bucket: !Ref CodeBucket
+        S3Key: fanout_analytics.zip
+
+  ESMA:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt FulfillQ.Arn
+      FunctionName: !Ref ProcFulfillment
+      BatchSize: 10
+      Enabled: true
+
+  ESMB:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt AnalyticsQ.Arn
+      FunctionName: !Ref ProcAnalytics
+      BatchSize: 10
+      Enabled: true

@@ -1,0 +1,67 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "SQS throttling + Lambda (concurrency=1 + DLQ)"
+Parameters:
+  CodeBucket: { Type: String, Default: cf-code }
+
+Resources:
+  TDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: demo-thr-dlq
+
+  TQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: demo-thr
+      VisibilityTimeout: 6
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt TDLQ.Arn
+        maxReceiveCount: 3
+
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: demo-thr-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: lambda-logs-sqs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [ logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents ]
+                Resource: "arn:aws:logs:*:*:*"
+              - Effect: Allow
+                Action: [ sqs:ReceiveMessage, sqs:DeleteMessage, sqs:GetQueueAttributes ]
+                Resource: "*"
+
+  ThrProc:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: demo-thr-proc
+      Runtime: python3.11
+      Handler: worker_stressed.handler
+      Role: !GetAtt LambdaRole.Arn
+      Timeout: 10
+      ReservedConcurrentExecutions: 1
+      Environment:
+        Variables:
+          FAIL_RATIO: "0.3"
+          SLEEP_MS: "2000"
+      Code:
+        S3Bucket: !Ref CodeBucket
+        S3Key: throttling_worker.zip
+
+  TMap:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt TQueue.Arn
+      FunctionName: !Ref ThrProc
+      BatchSize: 10
+      MaximumBatchingWindowInSeconds: 1
+      Enabled: true
