@@ -1,0 +1,25 @@
+variables:
+    ENV: dev
+    REGION: us-east-1
+    TIMEOUT: $ROLE_TIMEOUT # Timeout de assume role, los 15 minutos por defecto no son suficientes asique se variabiliza en ci/cd gitlab
+stages:
+    - Scan
+    - Cloudformation_Lint_Scan
+    - Cloudformation_Security_Scan
+    - Test
+    - CodeQuality
+    - Deploy
+ 
+include:
+  - project: 'gitlab-ci-templates/aws-serverless'
+    ref: 'master'
+    file: '.scan_code_dynamic.yml'
+  - project: 'gitlab-ci-templates/aws-serverless'
+    ref: 'master'
+    file: '.run_test.yml'
+  - project: 'gitlab-ci-templates/aws-serverless'
+    ref: 'master'
+    file: '.codequality.yml'
+  - project: 'gitlab-ci-templates/aws-serverless'
+    ref: 'master'
+    file: '.deploy_srvless.yml'

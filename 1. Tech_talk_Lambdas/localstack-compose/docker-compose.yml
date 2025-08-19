@@ -1,0 +1,28 @@
+version: "3.8"
+
+services:
+  localstack:
+    image: localstack/localstack:latest
+    container_name: localstack
+    ports:
+      - "4566:4566"
+      - "4510-4559:4510-4559"
+    environment:
+      - SERVICES=sns,sqs,lambda,cloudformation,iam,sts,logs,s3,apigateway,dynamodb
+      - DEBUG=1
+      - DATA_DIR=/var/lib/localstack/data
+      - LOCALSTACK_TMP_FOLDER=/tmp/localstack_tmp
+      - DOCKER_HOST=unix:///var/run/docker.sock
+      - PERSISTENCE=1
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock"
+      - ./localstack_tmp:/tmp/localstack_tmp
+      - ./localstack_logs:/var/log/localstack
+      - ./localstack_data:/var/lib/localstack/data
+    command: >
+      sh -c "localstack start --host"
+
+networks:
+  default:
+    external: true
+    name: lsnet

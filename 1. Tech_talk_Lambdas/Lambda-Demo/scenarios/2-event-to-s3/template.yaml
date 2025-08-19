@@ -1,0 +1,123 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Escenario 2 - Lambda que recibe datos desde API Gateway y guarda archivos en S3
+
+Parameters:
+  AppName:
+    Type: String
+    Description: Nombre de la aplicación o demo.
+  Account:
+    Type: String
+  Environment:
+    Type: String
+    AllowedValues:
+      - dev
+      - tst
+      - prod
+  LambdaName:
+    Type: String
+    Description: Nombre base de la Lambda
+  pPythonVersion:
+    Type: String
+    Default: python3.10
+
+Resources:
+  #? S3 Bucket para almacenar archivos
+  StorageBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Join ['-', [!Ref Account, !Ref Environment, !Ref AppName, 'events-messages-bucket']]
+
+  #? Role de la Lambda
+  ApiToS3LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Join ['-', [!Ref Account, !Ref Environment, !Ref LambdaName, 'dev-role-aws']]
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: !Join ['-', [!Ref AppName, 's3-access']]
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub "arn:aws:s3:::${StorageBucket}/*"
+
+  #? Log group
+  ApiToS3LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ['', ['/aws/lambda/', !Ref ApiToS3Function]]
+      RetentionInDays: 1
+
+  #? Lambda que escribe en S3
+  ApiToS3Function:
+    Type: AWS::Serverless::Function
+    Properties:
+      Runtime: !Ref pPythonVersion
+      FunctionName: !Join ['-', [!Ref Account, !Ref Environment, !Ref LambdaName, 'ApiToS3']]
+      CodeUri: functions/api_to_s3
+      Handler: function.lambda_handler
+      MemorySize: 256
+      Timeout: 10
+      Role: !GetAtt ApiToS3LambdaRole.Arn
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref StorageBucket
+          AWS_ENDPOINT_URL: http://host.docker.internal:4566
+
+  #? API Gateway HTTP endpoint
+  ApiToS3Api:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: dev
+      Name: !Join ['-', [!Ref Account, !Ref Environment, !Ref AppName, 'api']]
+      EndpointConfiguration: REGIONAL
+      Cors:
+        AllowMethods: "POST"
+        AllowHeaders: "Content-Type"
+        AllowOrigin: "*"
+
+  #? Permite que API Gateway invoque la Lambda
+  LambdaApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ApiToS3Function
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiToS3Api}/*/POST/
+
+  #? Vincula el endpoint POST con la Lambda
+  ApiToS3FunctionApi:
+    Type: AWS::Serverless::Function
+    Properties:
+      Runtime: !Ref pPythonVersion
+      FunctionName: !Join ['-', [!Ref Account, !Ref Environment, !Ref LambdaName, 'ApiToS3Endpoint']]
+      CodeUri: functions/api_to_s3
+      Handler: function.lambda_handler
+      MemorySize: 256
+      Timeout: 10
+      Role: !GetAtt ApiToS3LambdaRole.Arn
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref StorageBucket
+          AWS_ENDPOINT_URL: http://host.docker.internal:4566
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /upload-s3-event
+            Method: POST
+            RestApiId: !Ref ApiToS3Api

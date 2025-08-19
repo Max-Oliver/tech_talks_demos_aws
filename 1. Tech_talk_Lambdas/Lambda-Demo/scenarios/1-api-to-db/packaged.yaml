@@ -1,0 +1,121 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: "Escenario 1 - Lambda expuesta con URL p\xFAblica que guarda datos en\
+  \ DynamoDB\n"
+Parameters:
+  AppName:
+    Type: String
+    Description: "Nombre de la aplicaci\xF3n o demo."
+  Account:
+    Type: String
+  Environment:
+    Type: String
+    AllowedValues:
+    - dev
+    - tst
+    - prod
+  LambdaName:
+    Type: String
+    Description: Nombre base de la Lambda
+  pPythonVersion:
+    Type: String
+    Default: python3.10
+Resources:
+  EventsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName:
+        Fn::Join:
+        - '-'
+        - - Ref: Account
+          - Ref: Environment
+          - Ref: AppName
+          - events-table
+      AttributeDefinitions:
+      - AttributeName: id
+        AttributeType: S
+      KeySchema:
+      - AttributeName: id
+        KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+    Metadata:
+      SamResourceId: EventsTable
+  LambdaToDynamoRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName:
+        Fn::Join:
+        - '-'
+        - - Ref: Account
+          - Ref: Environment
+          - Ref: LambdaName
+          - lambda-url-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+      - PolicyName:
+          Fn::Join:
+          - '-'
+          - - Ref: LambdaName
+            - dynamodb-put
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - dynamodb:PutItem
+            Resource:
+              Fn::GetAtt:
+              - EventsTable
+              - Arn
+    Metadata:
+      SamResourceId: LambdaToDynamoRole
+  LambdaToDynamoLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName:
+        Fn::Join:
+        - ''
+        - - /aws/lambda/
+          - Ref: LambdaToDynamoFunction
+      RetentionInDays: 1
+    Metadata:
+      SamResourceId: LambdaToDynamoLogGroup
+  LambdaToDynamoFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Runtime:
+        Ref: pPythonVersion
+      FunctionName:
+        Fn::Join:
+        - '-'
+        - - Ref: Account
+          - Ref: Environment
+          - Ref: LambdaName
+          - LambdaToDynamo
+      CodeUri: s3://sam-local-artifacts/588e0a35b9e634ffa588d79c2ccee259
+      Handler: function.lambda_handler
+      MemorySize: 256
+      Timeout: 10
+      Role:
+        Fn::GetAtt:
+        - LambdaToDynamoRole
+        - Arn
+      Environment:
+        Variables:
+          TABLE_NAME:
+            Ref: EventsTable
+          AWS_ENDPOINT_URL: http://host.docker.internal:4566
+      FunctionUrlConfig:
+        AuthType: NONE
+    Metadata:
+      SamResourceId: LambdaToDynamoFunction

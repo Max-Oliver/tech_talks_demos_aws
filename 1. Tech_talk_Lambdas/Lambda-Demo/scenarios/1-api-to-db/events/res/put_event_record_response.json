@@ -1,0 +1,5 @@
+{
+  "statusCode": 200,
+  "headers": { "Content-Type": "application/json" },
+  "body": "{\"message\": \"Registro guardado en DynamoDB\", \"id\": \"3548e03f-e856-4b3d-8155-487f665596f1\", \"correlation_id\": \"f3742deb-69ab-4081-a965-e1ccbfff33ed\"}"
+}

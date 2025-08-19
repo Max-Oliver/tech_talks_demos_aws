@@ -1,0 +1,176 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: 'Escenario 2 - Lambda que recibe datos desde API Gateway y guarda archivos
+  en S3
+
+  '
+Parameters:
+  AppName:
+    Type: String
+    Description: "Nombre de la aplicaci\xF3n o demo."
+  Account:
+    Type: String
+  Environment:
+    Type: String
+    AllowedValues:
+    - dev
+    - tst
+    - prod
+  LambdaName:
+    Type: String
+    Description: Nombre base de la Lambda
+  pPythonVersion:
+    Type: String
+    Default: python3.10
+Resources:
+  StorageBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName:
+        Fn::Join:
+        - '-'
+        - - Ref: Account
+          - Ref: Environment
+          - Ref: AppName
+          - events-messages-bucket
+    Metadata:
+      SamResourceId: StorageBucket
+  ApiToS3LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName:
+        Fn::Join:
+        - '-'
+        - - Ref: Account
+          - Ref: Environment
+          - Ref: LambdaName
+          - dev-role-aws
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+      - PolicyName:
+          Fn::Join:
+          - '-'
+          - - Ref: AppName
+            - s3-access
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - s3:PutObject
+            Resource:
+              Fn::Sub: arn:aws:s3:::${StorageBucket}/*
+    Metadata:
+      SamResourceId: ApiToS3LambdaRole
+  ApiToS3LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName:
+        Fn::Join:
+        - ''
+        - - /aws/lambda/
+          - Ref: ApiToS3Function
+      RetentionInDays: 1
+    Metadata:
+      SamResourceId: ApiToS3LogGroup
+  ApiToS3Function:
+    Type: AWS::Serverless::Function
+    Properties:
+      Runtime:
+        Ref: pPythonVersion
+      FunctionName:
+        Fn::Join:
+        - '-'
+        - - Ref: Account
+          - Ref: Environment
+          - Ref: LambdaName
+          - ApiToS3
+      CodeUri: s3://sam-local-artifacts/e770645a3197f9812db6a8bac45aa462
+      Handler: function.lambda_handler
+      MemorySize: 256
+      Timeout: 10
+      Role:
+        Fn::GetAtt:
+        - ApiToS3LambdaRole
+        - Arn
+      Environment:
+        Variables:
+          BUCKET_NAME:
+            Ref: StorageBucket
+          AWS_ENDPOINT_URL: http://host.docker.internal:4566
+    Metadata:
+      SamResourceId: ApiToS3Function
+  ApiToS3Api:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: dev
+      Name:
+        Fn::Join:
+        - '-'
+        - - Ref: Account
+          - Ref: Environment
+          - Ref: AppName
+          - api
+      EndpointConfiguration: REGIONAL
+      Cors:
+        AllowMethods: POST
+        AllowHeaders: Content-Type
+        AllowOrigin: '*'
+    Metadata:
+      SamResourceId: ApiToS3Api
+  LambdaApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName:
+        Ref: ApiToS3Function
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn:
+        Fn::Sub: arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiToS3Api}/*/POST/
+    Metadata:
+      SamResourceId: LambdaApiPermission
+  ApiToS3FunctionApi:
+    Type: AWS::Serverless::Function
+    Properties:
+      Runtime:
+        Ref: pPythonVersion
+      FunctionName:
+        Fn::Join:
+        - '-'
+        - - Ref: Account
+          - Ref: Environment
+          - Ref: LambdaName
+          - ApiToS3Endpoint
+      CodeUri: s3://sam-local-artifacts/e770645a3197f9812db6a8bac45aa462
+      Handler: function.lambda_handler
+      MemorySize: 256
+      Timeout: 10
+      Role:
+        Fn::GetAtt:
+        - ApiToS3LambdaRole
+        - Arn
+      Environment:
+        Variables:
+          BUCKET_NAME:
+            Ref: StorageBucket
+          AWS_ENDPOINT_URL: http://host.docker.internal:4566
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /upload-s3-event
+            Method: POST
+            RestApiId:
+              Ref: ApiToS3Api
+    Metadata:
+      SamResourceId: ApiToS3FunctionApi

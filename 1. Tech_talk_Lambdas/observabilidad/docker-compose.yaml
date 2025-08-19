@@ -1,0 +1,69 @@
+
+# Define Docker Compose configuration for LocalStack + Grafana + Loki + Promtail
+version: "3.8"
+
+services:
+  # Loki: Log aggregation system
+  loki:
+    image: grafana/loki:2.9.0
+    container_name: loki
+    ports:
+      - "3100:3100"
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - ./loki:/loki
+      - ./loki_data:/tmp/loki
+      - ./loki-config.yaml:/etc/loki/local-config.yaml
+    networks:
+      - lsnet
+
+  # Promtail: Log shipper for Loki
+  promtail:
+    image: grafana/promtail:2.9.0
+    container_name: promtail
+    volumes:
+      - ../config/localstack_logs:/var/log/localstack   # ⬅️ Monta los logs reales
+      - ./promtail-config.yaml:/etc/promtail/config.yml
+    command: -config.file=/etc/promtail/config.yml
+    networks:
+      - lsnet
+  
+  tempo:
+    image: grafana/tempo:2.3.1
+    container_name: tempo
+    ports:
+      - "3200:3200" # Grafana
+      - "4318:4318" # Tempo HTTP API
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./tempo.yaml:/etc/tempo.yaml
+      - tempo-data:/tmp/tempo
+    networks:
+      - lsnet
+
+
+  # Grafana: Visualization UI
+  grafana:
+    image: grafana/grafana-oss:10.2.3
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-storage:/var/lib/grafana
+      - ./provisioning/datasources:/etc/grafana/provisioning/datasources  # <- Añadir esto
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    networks:
+      - lsnet
+    depends_on:
+      - tempo
+
+networks:
+  lsnet:
+    external: true
+
+volumes:
+  grafana-storage:
+  tempo-data:
+

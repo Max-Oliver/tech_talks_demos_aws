@@ -1,0 +1,23 @@
+[run]
+source = .
+
+# Indica los directorios o archivos que quieres excluir del análisis de cobertura.
+omit = 
+    */bin/*
+    */resources/*
+    *tests*
+    */__init__.py
+    */*.log
+    */*.md
+    */*.txt
+    */*.yaml
+    
+[report]
+# Configura el formato de los informes de cobertura. Puedes usar 'html', 'xml', 'json', entre otros.
+# En este ejemplo, generamos un informe en formato HTML y XML.
+
+show_missing = True
+skip_covered = True
+
+[xml]
+output = coverage-reports/coverage-report.xml

@@ -1,0 +1,15 @@
+.aws-sam
+.draft
+.idea
+.vscode
+.DS_Store
+.env
+build
+dist
+spv
+layers
+wkhtml
+pytest.log
+venv
+__pycache__
+.pytest_cache 

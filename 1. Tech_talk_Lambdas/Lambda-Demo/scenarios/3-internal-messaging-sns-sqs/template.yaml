@@ -1,0 +1,223 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Sample SAM Template for lambdas to subscribe and publish to an SNS topic
+
+
+#? Se crean objetos para utilizar en el resto del terraform, esto nos ayuda a invocar el objeto y sacar los atributos sin necesidade de repetirlo, prolijidad y performance
+Parameters:
+  AppName:
+    Type: String
+    Description: The name of the application these resources are associated to. This will be used in tagging.
+  Account:
+    Type: String
+    Description: AWS Account
+    MinLength: "1"
+    MaxLength: "41"
+    ConstraintDescription: must contain only alphanumeric characters and _.
+  Environment:
+    Type: String
+    Description: Environment
+    AllowedValues:
+      - dev
+      - tst
+      - prod
+      - prdev
+  LambdaName:
+    Type: String
+    Description: Nombre Lambda
+  pPythonVersion:
+    Type: String
+    Description: Version Python
+    Default: python3.10
+
+Resources:
+#* Publicador
+#? 🚀 ROLE IAM - del publicador - Politicas del role IAM..
+  PublisherRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Join ["-", [!Ref Account, !Ref Environment, !Ref LambdaName, "role-publisher"]]
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "lambda.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+
+#? 🚀 TOPICO SNS - en donde se crearan los eventos y se publicaran..
+  MySNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Join ["-", [!Ref Account, !Ref Environment, !Ref AppName, "AWS-SNS-DEMO"]]
+
+#? 🚀 POLITICA - del recurso SNS - Si es publcio, o que Roles pueden actuar, tambien a que topico se le aplica mencionando el topico creado.
+  SNSPublishMessagePolicy:
+    Type: "AWS::IAM::Policy"
+    Properties: 
+      PolicyName: !Join ["-", [!Ref Account, !Ref Environment, !Ref AppName, "sns-publish-policy"]]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Action: 
+              - sns:Publish
+            Resource: 
+              - !Ref MySNSTopic
+      Roles: 
+        - Ref: "PublisherRole"
+
+#? 🚀 GRUPO DE LOGS - del recurso SNS - Si es publcio, o que Roles pueden actuar, tambien a que topico se le aplica mencionando el topico creado.
+  PublisherLogGroup:
+      Type: AWS::Logs::LogGroup
+      Properties:
+        LogGroupName: !Join ["", ["/aws/lambda/", !Ref InternalPublisherFunction]]
+        RetentionInDays: 1
+
+#? 🚀 POLITICA DE CLOUDWATCH - del recurso InternalPublisherFunction - Se crea la politica de Cloudwatch para los grupos de logs de las funciones
+  CloudWatchLogsPublisherPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Join ["-", [!Ref LambdaName, "publisher-log-policy"]]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: "*"
+      Roles:
+        - Ref: PublisherRole
+
+#? 🚀 LAMBDA  - Se crea el recurso lambda del Publisher (Productor)
+  InternalPublisherFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Runtime: !Ref pPythonVersion
+      FunctionName: !Join ["-", [!Ref Account, !Ref Environment, !Ref LambdaName, "Publisher"]]
+      CodeUri: functions/internal_publisher
+      Handler: function.lambda_handler # -> Clase function.py metodo: lambda_handler() 
+      MemorySize: 256
+      Timeout: 10
+      Role: !GetAtt PublisherRole.Arn
+      Environment: 
+        Variables:
+          productName: pruebasns
+          region: !Ref "AWS::Region"
+          topicArn: !Ref MySNSTopic
+          AWS_ENDPOINT_URL: http://host.docker.internal:4566
+
+#*---------------------    -----------------------*#
+
+#* Subscriptor
+
+#? 📩 ROLE IAM - del consumidor - Se crean politicas puntuales para los consumidores, y se les añade las politicas de los roles que le correspondan
+  SubscriberRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Join ["-", [!Ref Account, !Ref Environment, !Ref LambdaName, "role-subscriber"]]
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "lambda.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaSQSQueueExecutionRole"
+
+#? 📩 TOPICO SQS - Se crea el SQS
+  MySqsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Join ["-", [!Ref Account, !Ref Environment, !Ref AppName, "AWS-SQS-DEMO"]]
+
+#? 📩 POLITICA - Se crea la politica de SNS para el Subscriptor, y se le asigna el role correspondiente, se le indica a que Queue va a subscribirse y cual SQS va a dejar los eventos.
+  SNSSubscribePolicy:
+    Type: "AWS::IAM::Policy"
+    Properties: 
+      PolicyName: !Join ["-", [!Ref Account, !Ref Environment, !Ref AppName, "sns-subscribe-policy"]]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Action: 
+              - sns:Subscribe
+            Resource: 
+              - !Ref MySNSTopic
+          - Effect: "Allow"
+            Action: 
+              - sqs:ReceiveMessage
+            Resource:
+              - !GetAtt MySqsQueue.Arn
+      Roles: 
+        - Ref: "SubscriberRole"
+
+#? 📩 SNS SUBSCRIPCION - Se crea la subscripcion al SNS desde la cola SQS
+  MySNSSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: sqs
+      Endpoint: !GetAtt MySqsQueue.Arn
+      TopicArn: !Ref MySNSTopic
+  
+#? 📩 SQS SUBSCRIPCION LAMBDA - desde la lambda SubscriptionFunction - Crea la subscripcion para que el listener se despierte cada vez que hay un mensaje en la queue
+  SqsToSubscriberEvent:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      BatchSize: 1
+      EventSourceArn: !GetAtt MySqsQueue.Arn
+      FunctionName: !Ref SubscriberFunction
+
+#? 📩 GRUPO DE LOGS - Se crea el recurso de LOGS, guarda los logs de la funcion mencionada en este caso el del subscriptor
+  SubscriberLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ["", ["/aws/lambda/", !Ref SubscriberFunction]]
+      RetentionInDays: 1
+
+#? 📩 POLITICA DE CLOUDWATCH - del recurso SubscriberFunction - Se crea la politica de Cloudwatch para los grupos de logs de las funciones
+  CloudWatchLogsPolicy:
+      Type: AWS::IAM::Policy
+      Properties:
+        PolicyName: !Join ["-", [!Ref LambdaName, "subscriber-log-policy"]]
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+              Resource: "*"
+        Roles:
+          - Ref: SubscriberRole
+
+#? 📩 LAMBDA - Se crea el recurso de lambda, que ejecuta la funcion de Subscriber (Consumidor)
+  SubscriberFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Runtime: !Ref pPythonVersion
+      FunctionName: !Join ["-", [!Ref Account, !Ref Environment, !Ref LambdaName, "Subscriber"]]
+      CodeUri: functions/internal_subscriber
+      Handler: function.lambda_handler  # -> Clase function.py metodo: lambda_handler() 
+      MemorySize: 256
+      Timeout: 10
+      Role: !GetAtt SubscriberRole.Arn
+      Environment: 
+        Variables:
+          productName: pruebasns
+          region: !Ref "AWS::Region"
+          AWS_ENDPOINT_URL: http://host.docker.internal:4566

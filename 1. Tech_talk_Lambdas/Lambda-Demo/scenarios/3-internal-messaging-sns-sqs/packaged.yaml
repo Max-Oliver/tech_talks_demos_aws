@@ -1,0 +1,302 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: 'Sample SAM Template for lambdas to subscribe and publish to an SNS topic
+
+  '
+Parameters:
+  AppName:
+    Type: String
+    Description: The name of the application these resources are associated to. This
+      will be used in tagging.
+  Account:
+    Type: String
+    Description: AWS Account
+    MinLength: '1'
+    MaxLength: '41'
+    ConstraintDescription: must contain only alphanumeric characters and _.
+  Environment:
+    Type: String
+    Description: Environment
+    AllowedValues:
+    - dev
+    - tst
+    - prod
+    - prdev
+  LambdaName:
+    Type: String
+    Description: Nombre Lambda
+  pPythonVersion:
+    Type: String
+    Description: Version Python
+    Default: python3.10
+Resources:
+  PublisherRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName:
+        Fn::Join:
+        - '-'
+        - - Ref: Account
+          - Ref: Environment
+          - Ref: LambdaName
+          - role-publisher
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+    Metadata:
+      SamResourceId: PublisherRole
+  MySNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName:
+        Fn::Join:
+        - '-'
+        - - Ref: Account
+          - Ref: Environment
+          - Ref: AppName
+          - AWS-SNS-DEMO
+    Metadata:
+      SamResourceId: MySNSTopic
+  SNSPublishMessagePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName:
+        Fn::Join:
+        - '-'
+        - - Ref: Account
+          - Ref: Environment
+          - Ref: AppName
+          - sns-publish-policy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action:
+          - sns:Publish
+          Resource:
+          - Ref: MySNSTopic
+      Roles:
+      - Ref: PublisherRole
+    Metadata:
+      SamResourceId: SNSPublishMessagePolicy
+  PublisherLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName:
+        Fn::Join:
+        - ''
+        - - /aws/lambda/
+          - Ref: InternalPublisherFunction
+      RetentionInDays: 1
+    Metadata:
+      SamResourceId: PublisherLogGroup
+  CloudWatchLogsPublisherPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName:
+        Fn::Join:
+        - '-'
+        - - Ref: LambdaName
+          - publisher-log-policy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action:
+          - logs:CreateLogGroup
+          - logs:CreateLogStream
+          - logs:PutLogEvents
+          Resource: '*'
+      Roles:
+      - Ref: PublisherRole
+    Metadata:
+      SamResourceId: CloudWatchLogsPublisherPolicy
+  InternalPublisherFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Runtime:
+        Ref: pPythonVersion
+      FunctionName:
+        Fn::Join:
+        - '-'
+        - - Ref: Account
+          - Ref: Environment
+          - Ref: LambdaName
+          - Publisher
+      CodeUri: s3://sam-local-artifacts/669a01387343a9dbf39f1ee122ebda85
+      Handler: function.lambda_handler
+      MemorySize: 256
+      Timeout: 10
+      Role:
+        Fn::GetAtt:
+        - PublisherRole
+        - Arn
+      Environment:
+        Variables:
+          productName: pruebasns
+          region:
+            Ref: AWS::Region
+          topicArn:
+            Ref: MySNSTopic
+          AWS_ENDPOINT_URL: http://host.docker.internal:4566
+    Metadata:
+      SamResourceId: InternalPublisherFunction
+  SubscriberRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName:
+        Fn::Join:
+        - '-'
+        - - Ref: Account
+          - Ref: Environment
+          - Ref: LambdaName
+          - role-subscriber
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      - arn:aws:iam::aws:policy/service-role/AWSLambdaSQSQueueExecutionRole
+    Metadata:
+      SamResourceId: SubscriberRole
+  MySqsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName:
+        Fn::Join:
+        - '-'
+        - - Ref: Account
+          - Ref: Environment
+          - Ref: AppName
+          - AWS-SQS-DEMO
+    Metadata:
+      SamResourceId: MySqsQueue
+  SNSSubscribePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName:
+        Fn::Join:
+        - '-'
+        - - Ref: Account
+          - Ref: Environment
+          - Ref: AppName
+          - sns-subscribe-policy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action:
+          - sns:Subscribe
+          Resource:
+          - Ref: MySNSTopic
+        - Effect: Allow
+          Action:
+          - sqs:ReceiveMessage
+          Resource:
+          - Fn::GetAtt:
+            - MySqsQueue
+            - Arn
+      Roles:
+      - Ref: SubscriberRole
+    Metadata:
+      SamResourceId: SNSSubscribePolicy
+  MySNSSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: sqs
+      Endpoint:
+        Fn::GetAtt:
+        - MySqsQueue
+        - Arn
+      TopicArn:
+        Ref: MySNSTopic
+    Metadata:
+      SamResourceId: MySNSSubscription
+  SqsToSubscriberEvent:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      BatchSize: 1
+      EventSourceArn:
+        Fn::GetAtt:
+        - MySqsQueue
+        - Arn
+      FunctionName:
+        Ref: SubscriberFunction
+    Metadata:
+      SamResourceId: SqsToSubscriberEvent
+  SubscriberLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName:
+        Fn::Join:
+        - ''
+        - - /aws/lambda/
+          - Ref: SubscriberFunction
+      RetentionInDays: 1
+    Metadata:
+      SamResourceId: SubscriberLogGroup
+  CloudWatchLogsPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName:
+        Fn::Join:
+        - '-'
+        - - Ref: LambdaName
+          - subscriber-log-policy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action:
+          - logs:CreateLogGroup
+          - logs:CreateLogStream
+          - logs:PutLogEvents
+          Resource: '*'
+      Roles:
+      - Ref: SubscriberRole
+    Metadata:
+      SamResourceId: CloudWatchLogsPolicy
+  SubscriberFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Runtime:
+        Ref: pPythonVersion
+      FunctionName:
+        Fn::Join:
+        - '-'
+        - - Ref: Account
+          - Ref: Environment
+          - Ref: LambdaName
+          - Subscriber
+      CodeUri: s3://sam-local-artifacts/1233504b04e98cd86eadbbba2b2e2b26
+      Handler: function.lambda_handler
+      MemorySize: 256
+      Timeout: 10
+      Role:
+        Fn::GetAtt:
+        - SubscriberRole
+        - Arn
+      Environment:
+        Variables:
+          productName: pruebasns
+          region:
+            Ref: AWS::Region
+          AWS_ENDPOINT_URL: http://host.docker.internal:4566
+    Metadata:
+      SamResourceId: SubscriberFunction
