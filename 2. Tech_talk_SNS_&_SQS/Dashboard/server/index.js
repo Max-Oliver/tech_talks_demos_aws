@@ -7,6 +7,12 @@ const {
   SQSClient,
   GetQueueUrlCommand,
   GetQueueAttributesCommand,
+  // 👇 NUEVOS:
+  ReceiveMessageCommand,
+  DeleteMessageCommand,
+  SendMessageCommand,
+  PurgeQueueCommand,
+  SendMessageBatchCommand,
 } = require('@aws-sdk/client-sqs');
 const {
   SNSClient,
@@ -124,15 +130,193 @@ async function qStats(name) {
         ],
       })
     );
+
+    const A = a.Attributes || {};
+    return {
+      name,
+      ApproximateNumberOfMessages: Number(A.ApproximateNumberOfMessages || 0),
+      ApproximateNumberOfMessagesNotVisible: Number(
+        A.ApproximateNumberOfMessagesNotVisible || 0
+      ),
+      ApproximateNumberOfMessagesDelayed: Number(
+        A.ApproximateNumberOfMessagesDelayed || 0
+      ),
+    };
     return { name, ...a.Attributes };
   } catch (e) {
     return { name, error: String((e && e.message) || e) };
   }
 }
 
+async function getCounters() {
+  return await getJsonOr('domain/counters.json', {
+    lastOrderNo: 0,
+    lastCorrNo: 0,
+  });
+}
+async function setCounters(c) {
+  await putJson('domain/counters.json', { ...c });
+}
+
+function pad3(n) {
+  return String(n).padStart(3, '0');
+}
+
+async function nextOrderId() {
+  const c = await getCounters();
+  c.lastOrderNo += 1;
+  await setCounters(c);
+  return pad3(c.lastOrderNo);
+}
+
+async function nextCorrelationId() {
+  const c = await getCounters();
+  c.lastCorrNo += 1;
+  await setCounters(c);
+  return pad3(c.lastCorrNo);
+}
+
+function shortUuid() {
+  return crypto.randomUUID().split('-')[0];
+} // más legible en UI
+
+async function getQueueUrl(name) {
+  const out = await sqs.send(new GetQueueUrlCommand({ QueueName: name }));
+  return out.QueueUrl;
+}
+
+async function peekMessages(name, max = 10) {
+  const QueueUrl = await getQueueUrl(name);
+  const resp = await sqs.send(
+    new ReceiveMessageCommand({
+      QueueUrl,
+      MaxNumberOfMessages: Math.max(1, Math.min(10, Number(max) || 10)),
+      VisibilityTimeout: 0, // 👈 no bloquear
+      WaitTimeSeconds: 0,
+      AttributeNames: ['All'],
+      MessageAttributeNames: ['All'],
+    })
+  );
+  return (resp.Messages || []).map((m) => ({
+    id: m.MessageId,
+    receipt: m.ReceiptHandle,
+    body: (() => {
+      try {
+        return JSON.parse(m.Body || '{}');
+      } catch {
+        return m.Body;
+      }
+    })(),
+    attributes: m.Attributes || {},
+  }));
+}
+
+async function purgeQueue(name) {
+  const QueueUrl = await getQueueUrl(name);
+  await sqs.send(new PurgeQueueCommand({ QueueUrl }));
+}
+
+async function retryFromDlq(dlqName, sourceName, receipt, body) {
+  const srcUrl = await getQueueUrl(sourceName);
+  const dlqUrl = await getQueueUrl(dlqName);
+  await sqs.send(
+    new SendMessageCommand({
+      QueueUrl: srcUrl,
+      MessageBody: typeof body === 'string' ? body : JSON.stringify(body || {}),
+    })
+  );
+  await sqs.send(
+    new DeleteMessageCommand({ QueueUrl: dlqUrl, ReceiptHandle: receipt })
+  );
+}
+const norm = (s) =>
+  String(s || '')
+    .trim()
+    .toLowerCase();
+
+async function recordReplenishment({
+  productId,
+  addedUnits,
+  previousStock,
+  newStock,
+  type = 'manual_restock',
+  reason = 'inventory_seed',
+}) {
+  const id = `repl-${Date.now()}-${productId}`;
+  const obj = {
+    id,
+    productId,
+    type, // 'manual_restock' | 'new_product' | 'out_of_stock'
+    reason,
+    addedUnits: Number(addedUnits || 0),
+    previousStock: Number(previousStock ?? 0),
+    newStock: Number(newStock ?? 0),
+    t: Date.now(),
+  };
+  await putJson(`domain/replenishments/${id}.json`, obj);
+  return obj;
+}
+
 // ----------------------- Endpoints -------------------
 // health
 app.get('/health', (_req, res) => res.json({ ok: true }));
+
+// ---- DLQ API ----
+// GET /dlq/:name/peek?max=10
+app.get('/dlq/:name/peek', async (req, res) => {
+  try {
+    const items = await peekMessages(req.params.name, req.query.max);
+    res.json(items);
+  } catch (e) {
+    res.status(500).json({ error: String(e?.message || e) });
+  }
+});
+
+// POST /dlq/:dlq/retry  { source, receipt, body }
+app.post('/dlq/:dlq/retry', async (req, res) => {
+  const { source, receipt, body } = req.body || {};
+  if (!source || !receipt || body == null) {
+    return res.status(400).json({ error: 'Missing source/receipt/body' });
+  }
+  try {
+    await retryFromDlq(req.params.dlq, source, receipt, body);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: String(e?.message || e) });
+  }
+});
+
+// DELETE /dlq/:name/purge
+app.delete('/dlq/:name/purge', async (req, res) => {
+  try {
+    await purgeQueue(req.params.name);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: String(e?.message || e) });
+  }
+});
+// ---- Throttling: enviar burst a demo-thr ----
+// POST /throttle/burst  { count?: number }
+app.post('/throttle/burst', async (req, res) => {
+  try {
+    const n = Math.max(1, Math.min(500, Number(req.body?.count || 120)));
+    const QueueUrl = await getQueueUrl('demo-thr');
+    let sent = 0,
+      id = 0;
+
+    while (sent < n) {
+      const batch = Array.from({ length: Math.min(10, n - sent) }, () => ({
+        Id: String(++id),
+        MessageBody: JSON.stringify({ kind: 'thr', i: id, t: Date.now() }),
+      }));
+      await sqs.send(new SendMessageBatchCommand({ QueueUrl, Entries: batch }));
+      sent += batch.length;
+    }
+    res.json({ ok: true, sent });
+  } catch (e) {
+    res.status(500).json({ error: String(e?.message || e) });
+  }
+});
 
 // colas (SQS)
 app.get('/queues', async (_req, res) => {
@@ -329,18 +513,118 @@ app.post('/seed/custom', async (req, res) => {
   res.json({ ok: true, correlationId: cId, orderId: oId });
 });
 
-// dominio: inventario/metrics/replenishments
+// inventario: inventario/metrics/replenishments
 app.get('/domain/inventory', async (_req, res) => {
   const inv = await getJsonOr('domain/inventory.json', []);
   res.json(inv);
 });
 
+// inventario: Crear y guardar pruductos
 app.post('/domain/inventory/seed', async (req, res) => {
-  const items = req.body?.items || [];
-  await putJson('domain/inventory.json', items);
-  res.json({ ok: true, items: items.length });
+  const raw = Array.isArray(req.body?.items) ? req.body.items : [];
+
+  const incoming = raw
+    .map((it) => ({
+      productId: String(it.productId ?? it.product ?? '').trim(),
+      name: String(it.name ?? it.productId ?? 'Unnamed').trim(),
+      price: Number(it.price ?? 0),
+      stock: Number(it.stock ?? it.quantity ?? 0),
+      reserved: it.reserved != null ? Number(it.reserved) : undefined,
+    }))
+    .filter((x) => x.productId || x.name);
+
+  const existing = await getJsonOr('domain/inventory.json', []);
+  const byId = new Map(existing.map((p) => [String(p.productId), { ...p }]));
+  const byName = new Map(
+    existing.map((p) => [norm(p.name || p.productId), String(p.productId)])
+  );
+
+  let created = 0,
+    updated = 0,
+    restocked = 0;
+
+  for (const inc of incoming) {
+    const matchById = inc.productId && byId.get(inc.productId);
+    const matchByNameId =
+      !matchById && inc.name ? byName.get(norm(inc.name)) : null;
+    const cur = matchById || (matchByNameId && byId.get(matchByNameId));
+
+    if (!cur) {
+      // nuevo producto
+      const productId = inc.productId || crypto.randomUUID().slice(0, 8);
+      const newItem = {
+        productId,
+        name: inc.name || productId,
+        price: Number(inc.price || 0),
+        stock: Number(inc.stock || 0),
+        reserved: Number(inc.reserved ?? 0),
+        updatedAt: Date.now(),
+      };
+      byId.set(productId, newItem);
+      byName.set(norm(newItem.name || newItem.productId), productId);
+      created++;
+
+      if (newItem.stock > 0) {
+        await recordReplenishment({
+          productId,
+          addedUnits: newItem.stock,
+          previousStock: 0,
+          newStock: newItem.stock,
+          type: 'new_product',
+        });
+        restocked++;
+      }
+    } else {
+      // existente → SUMAR stock (reposiciona)
+      const prev = Number(cur.stock || 0);
+      const add = Number(inc.stock || 0);
+
+      if (inc.name) cur.name = inc.name;
+      if (inc.price != null) cur.price = Number(inc.price);
+      if (inc.reserved != null) cur.reserved = Number(inc.reserved);
+
+      cur.stock = prev + add;
+      cur.updatedAt = Date.now();
+      byId.set(String(cur.productId), cur);
+      updated++;
+
+      if (add > 0) {
+        await recordReplenishment({
+          productId: cur.productId,
+          addedUnits: add,
+          previousStock: prev,
+          newStock: cur.stock,
+          type: 'manual_restock',
+        });
+        restocked++;
+      }
+    }
+  }
+
+  const merged = [...byId.values()];
+  await putJson('domain/inventory.json', merged);
+
+  res.json({ ok: true, created, updated, restocked, total: merged.length });
 });
 
+// inventario: Repongo si no hay un producto en inventario
+app.post('/domain/replenishments/create', async (req, res) => {
+  const { productId, missingQty, reason = 'out_of_stock' } = req.body || {};
+  if (!productId || !missingQty)
+    return res.status(400).json({ error: 'missing productId/missingQty' });
+  const id = `${Date.now()}-${productId}`;
+  const obj = {
+    id,
+    productId,
+    missingQty: Number(missingQty),
+    reason,
+    t: Date.now(),
+  };
+  await putJson(`domain/replenishments/${id}.json`, obj);
+  res.json({ ok: true, replenishment: obj });
+});
+
+// inventario: Actualizo inventario
 app.get('/domain/metrics', async (_req, res) => {
   const keys = await listKeys('analytics/');
   const agg = new Map();
@@ -366,6 +650,7 @@ app.get('/domain/metrics', async (_req, res) => {
   res.json([...agg.values()]);
 });
 
+// deprecado: inventario: Reabastecimientos pendientes
 app.get('/domain/replenishments', async (_req, res) => {
   const keys = await listKeys('domain/replenishments/');
   const out = [];
@@ -375,7 +660,7 @@ app.get('/domain/replenishments', async (_req, res) => {
         new GetObjectCommand({ Bucket: DATA_BUCKET, Key: k })
       );
       const d = JSON.parse(await obj.Body.transformToString());
-      out.push(d);
+      out.push({ ...d, key: k });
     } catch {}
   }
   res.json(out);
@@ -383,44 +668,101 @@ app.get('/domain/replenishments', async (_req, res) => {
 
 // crear orden desde UI
 app.post('/domain/order', async (req, res) => {
-  const items = req.body?.items || [];
+  const items = Array.isArray(req.body?.items) ? req.body.items : [];
   if (!items.length) return res.status(400).json({ error: 'items vacíos' });
-  const item = items[0];
-  const orderId = req.body.orderId || uuid();
-  const correlationId = req.body.correlationId || uuid();
-  const arn = await ensureTopicArn();
 
-  const payload = {
-    eventType: 'OrderPlaced',
-    priority: 'high',
-    orderId,
-    correlationId,
-    product: item.productId,
-    quantity: item.quantity,
-    price: item.unitPrice,
-  };
+  // IDs por defecto NNN-uuid (permití override desde UI)
+  const orderNo = req.body.orderId?.split('-')[0] || (await nextOrderId());
+  const corrNo =
+    req.body.correlationId?.split('-')[0] || (await nextCorrelationId());
+  const orderId = `${orderNo}-${shortUuid()}`;
+  const correlationId = `${corrNo}-${shortUuid()}`;
 
-  await putJson(`traces/${correlationId}/00-published.json`, {
-    t: Date.now(),
-    message: payload,
-  });
-  await putJson(`traces/${correlationId}/01-routes.json`, {
-    fulfillment: true,
-    analytics: true,
-  });
-
-  await sns.send(
-    new PublishCommand({
-      TopicArn: arn,
-      Message: JSON.stringify(payload),
-      MessageAttributes: {
-        eventType: { DataType: 'String', StringValue: 'OrderPlaced' },
-        priority: { DataType: 'String', StringValue: 'high' },
-      },
-    })
+  // 1 item por ahora
+  const wanted = items[0];
+  const inv = await getJsonOr('domain/inventory.json', []);
+  const prod = inv.find(
+    (p) => p.productId === wanted.productId || p.name === wanted.productId
   );
 
-  res.json({ ok: true, orderId, correlationId });
+  const unitPrice = prod?.price ?? Number(wanted.unitPrice || 0);
+  const have = Number(prod?.stock ?? 0);
+  const want = Number(wanted.quantity || 0);
+
+  let purchaseQty = Math.min(have, want);
+  const shortage = Math.max(0, want - purchaseQty);
+
+  // si no hay producto en inventario, lo tratamos como stock 0
+  if (!prod)
+    console.warn('Producto no encontrado en inventario:', wanted.productId);
+
+  // actualizar inventario (descuenta lo que se puede vender)
+  if (prod) {
+    prod.stock = Math.max(0, have - purchaseQty);
+    prod.updatedAt = Date.now();
+    await putJson('domain/inventory.json', inv);
+  }
+
+  // crear reposición automática si falta stock
+  let createdRepl = null;
+  if (shortage > 0) {
+    const id = `${Date.now()}-${wanted.productId}`;
+    const repl = {
+      id,
+      productId: wanted.productId,
+      missingQty: shortage,
+      reason: 'out_of_stock',
+      t: Date.now(),
+    };
+    await putJson(`domain/replenishments/${id}.json`, repl);
+    createdRepl = repl;
+  }
+
+  const arn = await ensureTopicArn();
+
+  // Publicar solo si hay algo que procesar
+  if (purchaseQty > 0) {
+    const payload = {
+      eventType: 'OrderPlaced',
+      priority: 'high',
+      orderId,
+      correlationId,
+      product: wanted.productId,
+      quantity: purchaseQty,
+      price: unitPrice,
+    };
+
+    await putJson(`traces/${correlationId}/00-published.json`, {
+      t: Date.now(),
+      message: payload,
+    });
+    await putJson(`traces/${correlationId}/01-routes.json`, {
+      fulfillment: true,
+      analytics: true,
+    });
+
+    await sns.send(
+      new PublishCommand({
+        TopicArn: arn,
+        Message: JSON.stringify(payload),
+        MessageAttributes: {
+          eventType: { DataType: 'String', StringValue: 'OrderPlaced' },
+          priority: { DataType: 'String', StringValue: 'high' },
+        },
+      })
+    );
+  }
+
+  res.json({
+    ok: true,
+    orderId,
+    correlationId,
+    unitPrice,
+    purchaseQty,
+    shortage,
+    createdReplenishment: createdRepl,
+    total: unitPrice * purchaseQty,
+  });
 });
 
 // ----------------------- Start -----------------------

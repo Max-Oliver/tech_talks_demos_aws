@@ -1,20 +1,105 @@
-// app/helpers/TraceHelpers.tsx
+/* eslint-disable @typescript-eslint/no-explicit-any */
+// src/app/helpers/TraceHelpers.tsx
 'use client';
 
-export type TracePart = {
-  name: string;
-  json?: any;
-  raw?: string;
-};
+import { JSX } from "react";
 
-export type ParsedTrace = {
-  cid: string;
-  payload: any | null;
-  forceDlq: 'pagos' | 'inv' | 'ship' | null;
-};
+export type TracePart = { name: string; json?: any; raw?: string };
+export type TraceDto = { id: string; steps: { key: string; data: any }[] };
 
-/** Parsea el HTML del backend: lista de partes (archivo + json) */
-export function parseTraceHtml(detailHtml: string): TracePart[] {
+// util mínimo para escapar html
+const esc = (s: string) =>
+  s.replace(
+    /[&<>"']/g,
+    (m) =>
+      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[
+        m
+      ]!)
+  );
+
+// 👉 si llega JSON de la API, lo transformo a la estructura HTML que
+//    ya consume tu TraceAccordion/parsers
+export function traceJsonToHtml(dto: TraceDto): string {
+  return (dto.steps || [])
+    .map((s) => {
+      const name = s.key.split('/').pop() || s.key;
+      const body = JSON.stringify(s.data ?? {});
+      return `<div><code>${esc(name)}</code> — ${esc(body)}</div>`;
+    })
+    .join('');
+}
+
+/** Devuelve etiquetas/“chips” según el nombre del archivo */
+export function chipsFor(name: string): JSX.Element[] {
+  const chips: JSX.Element[] = [];
+
+  if (/00-published/.test(name)) {
+    chips.push(
+      <span key="pub" className="px-2 py-0.5 bg-emerald-700 text-xs rounded">
+        Published
+      </span>
+    );
+  }
+  if (/01-routes/.test(name)) {
+    chips.push(
+      <span key="routes" className="px-2 py-0.5 bg-blue-700 text-xs rounded">
+        Routes
+      </span>
+    );
+  }
+  if (/fulfillment-received/.test(name)) {
+    chips.push(
+      <span key="frecv" className="px-2 py-0.5 bg-orange-700 text-xs rounded">
+        F recv
+      </span>
+    );
+  }
+  if (/fulfillment-processed/.test(name)) {
+    chips.push(
+      <span key="fdone" className="px-2 py-0.5 bg-green-700 text-xs rounded">
+        F done
+      </span>
+    );
+  }
+  if (/analytics-received/.test(name)) {
+    chips.push(
+      <span key="arecv" className="px-2 py-0.5 bg-orange-500 text-xs rounded">
+        A recv
+      </span>
+    );
+  }
+  if (/analytics-processed/.test(name)) {
+    chips.push(
+      <span key="adone" className="px-2 py-0.5 bg-green-500 text-xs rounded">
+        A done
+      </span>
+    );
+  }
+  if (/dlq/i.test(name)) {
+    chips.push(
+      <span key="dlq" className="px-2 py-0.5 bg-red-700 text-xs rounded">
+        DLQ
+      </span>
+    );
+  }
+
+  return chips;
+}
+
+// Asegura que lo que llegue sea HTML string (acepta string o dto)
+function ensureHtml(detail: unknown): string {
+  if (typeof detail === 'string') return detail;
+  if (detail && typeof detail === 'object' && 'steps' in (detail as any)) {
+    return traceJsonToHtml(detail as TraceDto);
+  }
+  return '';
+}
+
+/** Parsea el HTML a partes (nombre + json) */
+export function parseTraceHtml(detailHtmlOrDto: unknown): TracePart[] {
+  const detailHtml = ensureHtml(detailHtmlOrDto);
+  if (!detailHtml) return [];
+
   try {
     const root = document.createElement('div');
     root.innerHTML = detailHtml;
@@ -23,14 +108,18 @@ export function parseTraceHtml(detailHtml: string): TracePart[] {
       const code = div.querySelector('code');
       if (!code) return;
       const name = (code.textContent || '').trim();
-      const full = (div.textContent || '').trim();
-      const after = full.slice(full.indexOf(name) + name.length).replace(/^—\s*/, '');
+      const fullText = (div.textContent || '').trim();
+
+      // lo que viene después del nombre "— {...}"
+      const after = fullText
+        .slice(fullText.indexOf(name) + name.length)
+        .replace(/^—\s*/, '');
+
+      let json: any | undefined;
       try {
-        const json = JSON.parse(after);
-        parts.push({ name, json });
-      } catch {
-        parts.push({ name, raw: after });
-      }
+        json = JSON.parse(after);
+      } catch {}
+      parts.push({ name, json, raw: json ? undefined : after });
     });
     return parts.length ? parts : [{ name: '#raw', raw: detailHtml }];
   } catch {
@@ -38,53 +127,34 @@ export function parseTraceHtml(detailHtml: string): TracePart[] {
   }
 }
 
-export function parsedTraceFromHtml(detailHtml: string): ParsedTrace | null {
+// ========= lo que ya tenías, pero tolerante a string o JSON =========
+export type ParsedTrace = {
+  cid: string;
+  payload: any;
+  forceDlq: 'pagos' | 'inv' | 'ship' | null;
+};
+
+export function parsedTraceFromHtml(
+  detailHtmlOrDto: unknown
+): ParsedTrace | null {
+  const detailHtml = ensureHtml(detailHtmlOrDto);
   if (!detailHtml) return null;
+
   const parts = parseTraceHtml(detailHtml);
 
-  // CID: primer <b>...</b> o algo parecido
+  // CID en el encabezado <b>...</b> si existe
   let cid = '';
   const cidTag = detailHtml.match(/<b>([a-f0-9-]{8,})<\/b>/i);
   if (cidTag) cid = cidTag[1];
 
-  // Payload: suele ir en 00-published.json → .message o raíz
+  // payload: suele venir en 00-published.json
   const pub = parts.find((p) => p.name === '00-published.json');
   const payload = pub?.json?.message ?? pub?.json ?? null;
 
-  // Heurística para DLQ: fulfillment-failed → 'inv'
+  // forceDlq heurístico según archivos de falla
   let forceDlq: 'pagos' | 'inv' | 'ship' | null = null;
-  if (parts.some((p) => /30-fulfillment-failed\.json/i.test(p.name))) {
+  if (parts.some((p) => /30-fulfillment-failed/i.test(p.name)))
     forceDlq = 'inv';
-  }
 
   return { cid, payload, forceDlq };
-}
-
-/** Chips de estado por nombre de archivo */
-export function chipsFor(name: string) {
-  const yes = (txt: string, key: string) => (
-    <span key={key} className="px-2 py-[2px] rounded-full text-[11px] bg-emerald-500/10 text-emerald-300 border border-emerald-500/30">
-      {txt}
-    </span>
-  );
-  const no = (txt: string, key: string) => (
-    <span key={key} className="px-2 py-[2px] rounded-full text-[11px] bg-slate-800/60 text-slate-300 border border-slate-700">
-      {txt}
-    </span>
-  );
-
-  // patrones conocidos
-  if (/^00-published\.json$/i.test(name)) return [yes('Published', 'published')];
-  if (/^01-routes\.json$/i.test(name)) return [yes('Route → F', 'routeF'), yes('Route → A', 'routeA')];
-  if (/^10-fulfillment-received\.json$/i.test(name)) return [yes('Recv F', 'recvF')];
-  if (/^11-analytics-received\.json$/i.test(name)) return [yes('Recv A', 'recvA')];
-  if (/^20-fulfillment-processed\.json$/i.test(name)) return [yes('Done F', 'doneF')];
-  if (/^21-analytics-processed\.json$/i.test(name)) return [yes('Done A', 'doneA')];
-  if (/^30-fulfillment-failed\.json$/i.test(name)) return [no('Done F', 'doneF')];
-  if (/^31-analytics-failed\.json$/i.test(name)) return [no('Done A', 'doneA')];
-  if (/^[\w-]+-fulfillment-reserve-[\w-]+\.json$/i.test(name)) return [yes('Update Stock', 'updF')];
-  if (/^[\w-]+-analytics-updated-[\w-]+\.json$/i.test(name)) return [yes('Update Metrics', 'updA')];
-  if (/^50-dlq\.json$/i.test(name)) return [yes('DLQ', 'dlq')];
-
-  return [];
 }

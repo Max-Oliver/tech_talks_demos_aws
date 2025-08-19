@@ -78,3 +78,21 @@ ui-web:
 
 clean:
 > rm -rf .dist
+
+
+.PHONY: deploy-fanout deploy-thr burst-thr peek-dlq
+
+deploy-fanout:
+$(AWS) cloudformation deploy --stack-name fanout --template-file fanout.yml --capabilities CAPABILITY_NAMED_IAM
+
+
+deploy-thr:
+$(AWS) cloudformation deploy --stack-name throttling --template-file throttling.yml --capabilities CAPABILITY_NAMED_IAM
+
+
+burst-thr:
+curl -s -X POST http://localhost:4000/throttle/burst -H 'content-type: application/json' -d '{"count": 120}' | jq .
+
+
+peek-dlq:
+curl -s 'http://localhost:4000/dlq/demo-thr-dlq/peek?max=10' | jq .

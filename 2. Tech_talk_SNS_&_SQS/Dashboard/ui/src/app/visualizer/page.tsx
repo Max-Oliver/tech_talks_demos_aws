@@ -186,12 +186,6 @@ export default function FanoutVisualizer() {
 
     hardReset({ keepPayload: false });
 
-
-    if (cid && !payloadB64) {
-      const payload = fetchSafe(`${API}/trace/${cid}/published`);
-      startReplay({ payload, auto: mode === 'auto', speedMs: speed });
-    }
-
     async function go() {
       if (payloadB64) {
         const p = b64ToJson<any>(payloadB64);
