@@ -18,10 +18,21 @@ Resources:
     Type: AWS::SQS::Queue
     Properties:
       QueueName: demo-fulfill-sqs
-      VisibilityTimeout: 30
+      VisibilityTimeout: 30 # tiempo para procesar el mensaje
       RedrivePolicy:
-        deadLetterTargetArn: !GetAtt FulfillDLQ.Arn
-        maxReceiveCount: 3
+        deadLetterTargetArn: !GetAtt FulfillDLQ.Arn 
+        maxReceiveCount: 3   # reintentos antes de ir a DLQ
+  
+  # Shipping
+  ShippingDLQ: {Type: AWS::SQS::Queue, Properties: { QueueName: demo-shipping-sqs-dlq } }
+  ShippingQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: demo-shipping-sqs
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt ShippingDLQ.Arn
+        maxReceiveCount: 3 # reintentos antes de ir a DLQ
+      VisibilityTimeout: 30 # tiempo para procesar el mensaje
 
   # Analytics
   AnalyticsDLQ: { Type: AWS::SQS::Queue, Properties: { QueueName: demo-analytics-sqs-dlq } }
@@ -29,10 +40,10 @@ Resources:
     Type: AWS::SQS::Queue
     Properties:
       QueueName: demo-analytics-sqs
-      VisibilityTimeout: 30
+      VisibilityTimeout: 30 # tiempo para procesar el mensaje
       RedrivePolicy:
         deadLetterTargetArn: !GetAtt AnalyticsDLQ.Arn
-        maxReceiveCount: 3
+        maxReceiveCount: 3  # reintentos antes de ir a DLQ
 
   PolicyFulfill:
     Type: AWS::SQS::QueuePolicy
@@ -60,6 +71,19 @@ Resources:
             Resource: !GetAtt AnalyticsQ.Arn
             Condition: { ArnEquals: { aws:SourceArn: !Ref DemoTopic } }
 
+  PolicyShipping:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: [ !Ref ShippingQ ]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: Allow
+          Principal: "*"
+          Action: sqs:SendMessage
+          Resource: !GetAtt ShippingQ.Arn
+          Condition: { ArnEquals: { aws:SourceArn: !Ref DemoTopic } }
+
   SubFulfill:
     Type: AWS::SNS::Subscription
     Properties:
@@ -80,6 +104,17 @@ Resources:
       FilterPolicy:
         eventType: ["OrderPlaced","OrderShipped"]
         priority: ["high"]
+
+  SubShipping:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref DemoTopic
+      Protocol: sqs
+      Endpoint: !GetAtt ShippingQ.Arn
+      RawMessageDelivery: true
+      FilterPolicy:
+        eventType: ["OrderPlaced"]        # Shipping se dispara cuando se crea la orden
+        priority: ["high"]                # opcional para demostrar filtros
 
   LambdaRole:
     Type: AWS::IAM::Role
@@ -140,7 +175,24 @@ Resources:
         S3Bucket: !Ref CodeBucket
         S3Key: fanout_analytics.zip
 
-  ESMA:
+  ProcShipping:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: demo-fanout-shipping
+      Runtime: python3.11
+      Handler: index.handler
+      Role: !GetAtt LambdaRole.Arn
+      Timeout: 30
+      Environment:
+        Variables:
+          APP_NAME: "fanout"
+          DATA_BUCKET: "demo-data"
+          AWS_ENDPOINT_URL: "http://localstack:4566"
+      Code:
+        S3Bucket: !Ref CodeBucket
+        S3Key: "fanout_shipping.zip"
+
+  ESM_Fulfillment:
     Type: AWS::Lambda::EventSourceMapping
     Properties:
       EventSourceArn: !GetAtt FulfillQ.Arn
@@ -148,10 +200,21 @@ Resources:
       BatchSize: 10
       Enabled: true
 
-  ESMB:
+  ESM_Analytics:
     Type: AWS::Lambda::EventSourceMapping
     Properties:
       EventSourceArn: !GetAtt AnalyticsQ.Arn
       FunctionName: !Ref ProcAnalytics
       BatchSize: 10
       Enabled: true
+
+  ESM_Shipping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt ShippingQ.Arn
+      FunctionName: !Ref ProcShipping
+      BatchSize: 10
+      Enabled: true
+  
+
+

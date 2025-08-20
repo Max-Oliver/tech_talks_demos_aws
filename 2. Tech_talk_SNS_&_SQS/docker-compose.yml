@@ -9,6 +9,7 @@ services:
       - AWS_DEFAULT_REGION=us-east-1
       - DEBUG=1
       - DOCKER_HOST=unix:///var/run/docker.sock
+      - SQS_CLOUDWATCH_METRICS_REPORT_INTERVAL=60
     ports:
       - '4566:4566'
     volumes:

@@ -29,6 +29,11 @@ const {
   HeadBucketCommand,
 } = require('@aws-sdk/client-s3');
 
+const {
+  CloudWatchClient,
+  GetMetricDataCommand,
+} = require('@aws-sdk/client-cloudwatch');
+
 // ----------------------- Config -----------------------
 const PORT = Number(process.env.PORT || 4000);
 const AWS_REGION = process.env.AWS_REGION || 'us-east-1';
@@ -43,6 +48,12 @@ const awsCfg = {
   credentials: { accessKeyId: AWS_KEY, secretAccessKey: AWS_SECRET },
   endpoint: AWS_ENDPOINT,
 };
+
+const cw = new CloudWatchClient({
+  region: 'us-east-1',
+  endpoint: 'http://localhost:4566',
+  credentials: { accessKeyId: 'test', secretAccessKey: 'test' },
+});
 
 const s3 = new S3Client({ ...awsCfg, forcePathStyle: true });
 const sqs = new SQSClient(awsCfg);
@@ -178,7 +189,7 @@ async function nextCorrelationId() {
 
 function shortUuid() {
   return crypto.randomUUID().split('-')[0];
-} // más legible en UI
+}
 
 async function getQueueUrl(name) {
   const out = await sqs.send(new GetQueueUrlCommand({ QueueName: name }));
@@ -764,6 +775,151 @@ app.post('/domain/order', async (req, res) => {
     total: unitPrice * purchaseQty,
   });
 });
+
+// helper para contar objetos por sufijo dentro de 'traces/'
+function countBySuffix(keys, suffix) {
+  return keys.filter((k) => k.endsWith(suffix)).length;
+}
+// helper para contar objetos bajo un prefijo (p.ej. orders/)
+async function countPrefix(prefix) {
+  const out = await s3.send(
+    new ListObjectsV2Command({ Bucket: DATA_BUCKET, Prefix: prefix })
+  );
+  return (out.Contents || []).length;
+}
+
+app.get('/metrics', async (_req, res) => {
+  try {
+    // 1) estado actual de colas (incluye DLQs)
+    const queueNames = [
+      'demo-fulfill-sqs',
+      'demo-analytics-sqs',
+      'demo-thr',
+      'demo-fulfill-sqs-dlq',
+      'demo-analytics-sqs-dlq',
+      'demo-thr-dlq',
+    ];
+    const queues = await Promise.all(
+      queueNames.map((n) => qStats(n).catch(() => ({ name: n, error: true })))
+    );
+
+    // 2) contadores por trazas (por presencia de archivos)
+    const tkeys = await listKeys('traces/'); // todas las trazas
+    const metricsByTrace = {
+      published: countBySuffix(tkeys, '00-published.json'),
+      routed: countBySuffix(tkeys, '01-routes.json'),
+      f_recv: countBySuffix(tkeys, '10-fulfillment-received.json'),
+      f_done: countBySuffix(tkeys, '20-fulfillment-processed.json'),
+      a_recv: countBySuffix(tkeys, '11-analytics-received.json'),
+      a_done: countBySuffix(tkeys, '21-analytics-processed.json'),
+    };
+
+    // 3) “procesados OK” = artefactos generados en S3
+    const processed = {
+      fulfillment: await countPrefix('orders/'),
+      analytics: await countPrefix('analytics/'),
+    };
+
+    // 4) DLQ “stock actual” (pendientes)
+    const dlqCounts = {
+      fulfill: Number(
+        queues.find((q) => q.name === 'demo-fulfill-sqs-dlq')
+          ?.ApproximateNumberOfMessages || 0
+      ),
+      analytics: Number(
+        queues.find((q) => q.name === 'demo-analytics-sqs-dlq')
+          ?.ApproximateNumberOfMessages || 0
+      ),
+      thr: Number(
+        queues.find((q) => q.name === 'demo-thr-dlq')
+          ?.ApproximateNumberOfMessages || 0
+      ),
+    };
+
+    res.json({
+      queues,
+      metricsByTrace,
+      processed,
+      dlqCounts,
+      bucket: DATA_BUCKET,
+    });
+  } catch (e) {
+    res.status(500).json({ error: String(e?.message || e) });
+  }
+});
+
+app.get('/cw/sqs/:queue/summary', async (req, res) => {
+  try {
+    const QueueName = req.params.queue;
+    const EndTime = new Date();
+    const StartTime = new Date(EndTime.getTime() - 60 * 60 * 1000);
+    const P = 60;
+    const Q = (Id, MetricName, Stat = 'Sum') => ({
+      Id,
+      ReturnData: true,
+      MetricStat: {
+        Metric: {
+          Namespace: 'AWS/SQS',
+          MetricName,
+          Dimensions: [{ Name: 'QueueName', Value: QueueName }],
+        },
+        Period: P,
+        Stat,
+      },
+    });
+    const out = await cw.send(
+      new GetMetricDataCommand({
+        StartTime,
+        EndTime,
+        MetricDataQueries: [
+          Q('sent', 'NumberOfMessagesSent'),
+          Q('recv', 'NumberOfMessagesReceived'),
+          Q('del', 'NumberOfMessagesDeleted'),
+          Q('vis', 'ApproximateNumberOfMessagesVisible', 'Average'),
+          Q('nvis', 'ApproximateNumberOfMessagesNotVisible', 'Average'),
+        ],
+      })
+    );
+    res.json(out.MetricDataResults || []);
+  } catch {
+    // En LocalStack puede no estar implementado CloudWatch
+    res.json([]);
+  }
+});
+
+// al tope ya tenés SQSClient y GetQueueUrlCommand
+import fetch from "node-fetch"; // si usas Node <18 o CommonJS
+// en ESM con Node >=18 podés usar global fetch
+
+
+// backdoor para ver mensajes en una Queue SQS (peek) - Localstack docs
+app.get('/peek/:queue', async (req, res) => {
+  try {
+    // 1) Resolvemos la QueueUrl “real”
+    const QueueUrl = await sqs.send(
+      new GetQueueUrlCommand({ QueueName: req.params.queue })
+    ).then(r => r.QueueUrl);
+
+    // 2) Armamos URL del backdoor (peek)
+    const url = new URL('http://localhost:4566/_aws/sqs/messages');
+    url.searchParams.set('QueueUrl', QueueUrl);
+    // tip: mostrás TODO para explicación de inflight/delayed
+    if (req.query.all === '1') {
+      url.searchParams.set('ShowInvisible', 'true');
+      url.searchParams.set('ShowDelayed', 'true');
+    }
+
+    const r = await fetch(url.toString(), { headers: { Accept: 'application/json' } });
+    const json = await r.json();
+
+    // La forma JSON puede venir envuelta: normalizamos a array de mensajes
+    const msgs = json?.ReceiveMessageResponse?.ReceiveMessageResult?.Message ?? json?.Messages ?? json ?? [];
+    res.json(Array.isArray(msgs) ? msgs : [msgs]);
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
 
 // ----------------------- Start -----------------------
 (async () => {

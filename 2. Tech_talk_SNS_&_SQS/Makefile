@@ -40,7 +40,7 @@ fi; \
 for i in $$(seq 1 60); do \
   s=$$($(awslocal) cloudformation describe-stacks --stack-name $(1) --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo NOSTACK); \
   echo "[$(1)] $$s"; \
-  case "$$s" in CREATE_COMPLETE|UPDATE_COMPLETE) exit 0;; ROLLBACK_*|*_FAILED) exit 1;; esac; \
+  case "$$s" in (CREATE_COMPLETE|UPDATE_COMPLETE) exit 0;; ROLLBACK_*|*_FAILED) exit 1;; esac; \
   sleep 1; \
 done; \
 echo "[ $(1) ] timeout"; exit 1
@@ -54,6 +54,7 @@ deploy-fanout:
 
 deploy-thr:
 > $(call cfn_deploy,demo-thr,infra/throttling.yml)
+
 
 seed-fanout:
 > bash Dashboard/scripts/seed_fanout.sh
@@ -78,21 +79,3 @@ ui-web:
 
 clean:
 > rm -rf .dist
-
-
-.PHONY: deploy-fanout deploy-thr burst-thr peek-dlq
-
-deploy-fanout:
-$(AWS) cloudformation deploy --stack-name fanout --template-file fanout.yml --capabilities CAPABILITY_NAMED_IAM
-
-
-deploy-thr:
-$(AWS) cloudformation deploy --stack-name throttling --template-file throttling.yml --capabilities CAPABILITY_NAMED_IAM
-
-
-burst-thr:
-curl -s -X POST http://localhost:4000/throttle/burst -H 'content-type: application/json' -d '{"count": 120}' | jq .
-
-
-peek-dlq:
-curl -s 'http://localhost:4000/dlq/demo-thr-dlq/peek?max=10' | jq .

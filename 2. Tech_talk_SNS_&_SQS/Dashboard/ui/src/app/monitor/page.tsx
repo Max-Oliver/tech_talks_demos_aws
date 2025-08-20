@@ -35,6 +35,7 @@ import {
   LucideArrowDownToDot,
   LucideRemoveFormatting,
 } from 'lucide-react';
+import { loadMetricsAll } from '@/components/KpiMetrics';
 
 export const API = process.env.NEXT_PUBLIC_API || 'http://localhost:4000';
 
@@ -89,6 +90,22 @@ type ReplenItem = {
   t?: number;
   key?: string; // si incluyes el S3 key en el listado
 };
+
+type MetricsResp = {
+  queues: QueueStat[];
+  metricsByTrace: {
+    published: number;
+    routed: number;
+    f_recv: number;
+    f_done: number;
+    a_recv: number;
+    a_done: number;
+  };
+  processed: { fulfillment: number; analytics: number };
+  dlqCounts: { fulfill: number; analytics: number; thr: number };
+  bucket: string;
+};
+
 // ===== styles =====
 // estilos base
 const noSpin =
@@ -345,7 +362,7 @@ export default function MonitoringPage() {
       });
 
       await loadInventory(); // refresca tabla/selector
-      await reloadReplenishments();   // ⬅️ refresca el panel de “Métricas & Reposición”
+      await reloadReplenishments(); // ⬅️ refresca el panel de “Métricas & Reposición”
       setInvDraft([{ productId: '', name: '', price: 0, stock: 10 }]); // resetear draft
 
       setSaveMsg('Guardado ✓');
@@ -377,7 +394,6 @@ export default function MonitoringPage() {
     typeof detail === 'string' ? detail : traceJsonToHtml(detail as any);
 
   // KPIS
-
   type QueueStat = {
     name: string;
     ApproximateNumberOfMessages?: number;
@@ -489,9 +505,10 @@ export default function MonitoringPage() {
     }
     // refrescar métricas y colas
     void loadSummary();
-    await loadInventory()
-    await reloadReplenishments()
-    await refresh()
+    await loadInventory();
+    await reloadReplenishments();
+    await loadMetricsAll();
+    await refresh();
   }
 
   const reloadReplenishments = React.useCallback(async () => {
@@ -569,6 +586,38 @@ export default function MonitoringPage() {
     void loadInventory();
   }, [loadInventory]);
 
+  // KPIS
+  const [mx, setMx] = React.useState<MetricsResp | null>(null);
+  const [cwSel, setCwSel] = React.useState<string>('demo-thr');
+  const [cwRows, setCwRows] = React.useState<any[] | null>(null);
+
+  const loadMetricsAll = React.useCallback(async () => {
+    try {
+      const m = await fetchSafe<MetricsResp>(`${API}/metrics`);
+      setMx(m);
+    } catch (e) {
+      // si no existe /metrics todavía, evitamos romper el render
+      console.warn('KPIs: /metrics no disponible:', e);
+      setMx(null);
+    }
+  }, []);
+
+  const loadCw = React.useCallback(async (q: string) => {
+    try {
+      const r = await fetchSafe<any[]>(
+        `${API}/cw/sqs/${encodeURIComponent(q)}/summary`
+      );
+      setCwRows(r);
+      await loadMetricsAll(); // recarga KPIs
+    } catch {
+      setCwRows(null); // en LocalStack puede no estar
+    }
+  }, []);
+
+  React.useEffect(() => {
+    void loadMetricsAll();
+  }, [loadMetricsAll]);
+
   return (
     <div className="min-h-screen bg-[linear-gradient(180deg,#0b1220,rgba(11,18,32,0.92))] text-slate-100 px-4 md:px-6 pb-8">
       <TopNav title={<>Fanout &amp; SQS — Monitor</>} />
@@ -579,14 +628,21 @@ export default function MonitoringPage() {
         value={activeTab}
         onValueChange={(v) => {
           setActiveTab(v as TabKey);
-          if (v === 'overview') void refresh();
+          if (v === 'overview') {
+            void refresh();
+            void loadMetricsAll();
+          }
+          if (v === 'orders') {
+            void loadMetricsAll();
+          }
         }}
       >
         <div className="flex items-center justify-between mb-4 mt-10">
           <TabsList className="bg-slate-900/60 border border-slate-800">
             <TabsTrigger value="overview">Resumen</TabsTrigger>
             <TabsTrigger value="orders">Pedidos</TabsTrigger>
-            <TabsTrigger value="messaging">Mensajería</TabsTrigger>
+            <TabsTrigger value="kpis">Monitoring</TabsTrigger>
+            <TabsTrigger value="messaging">DLQ Service</TabsTrigger>
             <TabsTrigger value="storage">Almacenamiento</TabsTrigger>
             <TabsTrigger value="traces">Trazas</TabsTrigger>
           </TabsList>
@@ -611,22 +667,40 @@ export default function MonitoringPage() {
         {/* ===== RESUMEN ===== */}
         <TabsContent value="overview" className="space-y-4">
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-            {[
-              ['Pedidos hoy', todayOrders],
-              ['Eventos proc.', totalMsgs],
-              ['% errores', `${errPct}%`],
-              [
-                'Ingresos',
-                metrics ? `$${metrics.totalRevenue.toFixed(2)}` : '—',
-              ],
-            ].map(([k, v], i) => (
-              <Card key={i} className="border-slate-800 bg-slate-900/50">
-                <CardContent className="p-4">
-                  <div className="text-slate-400 text-xs">{k}</div>
-                  <div className="text-2xl font-semibold">{v}</div>
-                </CardContent>
-              </Card>
-            ))}
+            {(() => {
+              const received =
+                (mx?.metricsByTrace?.f_recv ?? 0) +
+                (mx?.metricsByTrace?.a_recv ?? 0);
+              const processedOk =
+                (mx?.metricsByTrace?.f_done ?? 0) +
+                (mx?.metricsByTrace?.a_done ?? 0);
+              const dlq =
+                (mx?.dlqCounts?.fulfill ?? 0) +
+                (mx?.dlqCounts?.analytics ?? 0) +
+                (mx?.dlqCounts?.thr ?? 0);
+              const base = processedOk + dlq;
+              const errPct = base ? Math.round((dlq / base) * 100) : 0;
+
+              const cards: [string, string | number][] = [
+                ['Eventos recibidos', received],
+                ['Procesados OK', processedOk],
+                ['En DLQ (pend.)', dlq],
+                ['% error (estim.)', `${errPct}%`],
+              ];
+
+              return (
+                <>
+                  {cards.map(([k, v], i) => (
+                    <Card key={i} className="border-slate-800 bg-slate-900/50">
+                      <CardContent className="p-4">
+                        <div className="text-slate-400 text-xs">{k}</div>
+                        <div className="text-2xl font-semibold">{v as any}</div>
+                      </CardContent>
+                    </Card>
+                  ))}
+                </>
+              );
+            })()}
           </div>
 
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
@@ -775,7 +849,40 @@ export default function MonitoringPage() {
 
         {/* ===== PEDIDOS ===== */}
         <TabsContent value="orders" className="space-y-4">
-          <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+          <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
+            {(() => {
+              const ordersOk = mx ? mx.processed.fulfillment ?? 0 : 0; // archivos en S3/orders/
+              const fulfillRecv = mx?.metricsByTrace?.f_recv ?? 0;
+              const fulfillDone = mx?.metricsByTrace?.f_done ?? 0;
+              const revenue = met.reduce(
+                (a, m) => a + Number(m.totalRevenue || 0),
+                0
+              );
+              const productsWithSales = met.length;
+
+              const cards: [string, string | number][] = [
+                ['Ordenes de compra recibidas', fulfillRecv],
+                ['Órdenes procesadas OK', ordersOk],
+                ['Pedidos Despachados', fulfillDone],
+                ['Ingresos totales', `$${revenue.toFixed(2)}`],
+                ['Productos con ventas', productsWithSales],
+              ];
+
+              return (
+                <>
+                  {cards.map(([k, v], i) => (
+                    <Card key={i} className="border-slate-800 bg-slate-900/50">
+                      <CardContent className="p-4">
+                        <div className="text-slate-400 text-xs">{k}</div>
+                        <div className="text-2xl font-semibold">{v as any}</div>
+                      </CardContent>
+                    </Card>
+                  ))}
+                </>
+              );
+            })()}
+          </div>
+          <div className="grid grid-cols-2 xl:grid-cols-2 gap-4">
             {/* Crear pedido */}
             <Card className="border-slate-800 bg-slate-900/50">
               <CardHeader className="pb-2">
@@ -1183,6 +1290,304 @@ export default function MonitoringPage() {
               </div>
             </CardContent>
           </Card>
+        </TabsContent>
+
+        {/* ===== MONITOREO ===== */}
+        <TabsContent value="kpis" className="space-y-4">
+          {/* Cards superiores */}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+            {(() => {
+              const ready = (mx?.queues || [])
+                .filter((q) => !q.name.endsWith('-dlq'))
+                .reduce(
+                  (a, q) => a + Number(q.ApproximateNumberOfMessages ?? 0),
+                  0
+                );
+              const inflight = (mx?.queues || []).reduce(
+                (a, q) =>
+                  a + Number(q.ApproximateNumberOfMessagesNotVisible ?? 0),
+                0
+              );
+              const delayed = (mx?.queues || []).reduce(
+                (a, q) => a + Number(q.ApproximateNumberOfMessagesDelayed ?? 0),
+                0
+              );
+              const dlqReady = (mx?.queues || [])
+                .filter((q) => q.name.endsWith('-dlq'))
+                .reduce(
+                  (a, q) => a + Number(q.ApproximateNumberOfMessages ?? 0),
+                  0
+                );
+
+              const processedOkS3 =
+                (mx?.processed?.fulfillment ?? 0) +
+                (mx?.processed?.analytics ?? 0);
+              const processedStages =
+                (mx?.metricsByTrace?.f_done ?? 0) +
+                (mx?.metricsByTrace?.a_done ?? 0);
+              const errPct = (() => {
+                const base =
+                  (mx?.metricsByTrace?.published ?? 0) || processedStages;
+                const dlqTally =
+                  (mx?.dlqCounts?.fulfill ?? 0) +
+                  (mx?.dlqCounts?.analytics ?? 0) +
+                  (mx?.dlqCounts?.thr ?? 0);
+                return base ? Math.round((dlqTally / base) * 100) : 0;
+              })();
+
+              const cards: [string, string | number][] = [
+                ['Backlog (ready)', ready],
+                ['In-Flight', inflight],
+                ['DLQ (ready)', dlqReady],
+                ['Procesadas OK (S3)', processedOkS3],
+                ['Fulfilled OK (trazas)', mx?.metricsByTrace?.f_done ?? 0],
+                ['Analytics OK (trazas)', mx?.metricsByTrace?.a_done ?? 0],
+                ['Delayed', delayed],
+                ['% errores (estim.)', `${errPct}%`],
+              ];
+              return cards.map(([k, v], i) => (
+                <Card key={i} className="border-slate-800 bg-slate-900/50">
+                  <CardContent className="p-4">
+                    <div className="text-slate-400 text-xs">{k}</div>
+                    <div className="text-2xl font-semibold">{v as any}</div>
+                  </CardContent>
+                </Card>
+              ));
+            })()}
+          </div>
+
+          {/* Tablas de detalle */}
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+            {/* Colas SQS (snapshot) */}
+            <Card className="border-slate-800 bg-slate-900/50">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-slate-200">
+                  Colas — snapshot
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="max-h-[48vh] overflow-auto">
+                <table className="w-full text-sm">
+                  <thead className="sticky top-0 bg-slate-900/60 text-sky-300">
+                    <tr>
+                      <th className="text-left p-2">Queue</th>
+                      <th className="text-center p-2">Ready</th>
+                      <th className="text-center p-2">In-Flight</th>
+                      <th className="text-center p-2">Delayed</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(mx?.queues || []).map((q) => (
+                      <tr key={q.name} className="border-t border-slate-800">
+                        <td className="p-2">
+                          <code>{q.name}</code>
+                        </td>
+                        <td className="text-center">
+                          {q.ApproximateNumberOfMessages ?? 0}
+                        </td>
+                        <td className="text-center">
+                          {q.ApproximateNumberOfMessagesNotVisible ?? 0}
+                        </td>
+                        <td className="text-center">
+                          {q.ApproximateNumberOfMessagesDelayed ?? 0}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </CardContent>
+            </Card>
+
+            {/* KPIs por trazas y artefactos */}
+            <Card className="border-slate-800 bg-slate-900/50">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-slate-200">
+                  Trazas & artefactos
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="grid grid-cols-2 gap-4">
+                <div>
+                  <div className="text-slate-400 text-sm mb-2">
+                    Trazas (conteo por archivos)
+                  </div>
+                  <table className="w-full text-sm">
+                    <tbody>
+                      <tr>
+                        <td className="p-1">00-published</td>
+                        <td className="p-1 text-right">
+                          {mx?.metricsByTrace?.published ?? 0}
+                        </td>
+                      </tr>
+                      <tr>
+                        <td className="p-1">10-fulfillment-received</td>
+                        <td className="p-1 text-right">
+                          {mx?.metricsByTrace?.f_recv ?? 0}
+                        </td>
+                      </tr>
+                      <tr>
+                        <td className="p-1">20-fulfillment-processed</td>
+                        <td className="p-1 text-right">
+                          {mx?.metricsByTrace?.f_done ?? 0}
+                        </td>
+                      </tr>
+                      <tr>
+                        <td className="p-1">11-analytics-received</td>
+                        <td className="p-1 text-right">
+                          {mx?.metricsByTrace?.a_recv ?? 0}
+                        </td>
+                      </tr>
+                      <tr>
+                        <td className="p-1">21-analytics-processed</td>
+                        <td className="p-1 text-right">
+                          {mx?.metricsByTrace?.a_done ?? 0}
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div>
+                  <div className="text-slate-400 text-sm mb-2">
+                    Procesados (artefactos S3)
+                  </div>
+                  <table className="w-full text-sm">
+                    <tbody>
+                      <tr>
+                        <td className="p-1">Orders/</td>
+                        <td className="p-1 text-right">
+                          {mx?.processed?.fulfillment ?? 0}
+                        </td>
+                      </tr>
+                      <tr>
+                        <td className="p-1">Analytics/</td>
+                        <td className="p-1 text-right">
+                          {mx?.processed?.analytics ?? 0}
+                        </td>
+                      </tr>
+                      <tr className="border-t border-slate-800">
+                        <td className="p-1 font-medium">Total</td>
+                        <td className="p-1 text-right font-medium">
+                          {(mx?.processed?.fulfillment ?? 0) +
+                            (mx?.processed?.analytics ?? 0)}
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+
+          {/* DLQ y CloudWatch */}
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+            {/* DLQ totales */}
+            <Card className="border-slate-800 bg-slate-900/50">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-slate-200">
+                  DLQ — pendientes
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <table className="w-full text-sm">
+                  <tbody>
+                    <tr>
+                      <td className="p-1">fulfill-dlq</td>
+                      <td className="p-1 text-right">
+                        {mx?.dlqCounts?.fulfill ?? 0}
+                      </td>
+                    </tr>
+                    <tr>
+                      <td className="p-1">analytics-dlq</td>
+                      <td className="p-1 text-right">
+                        {mx?.dlqCounts?.analytics ?? 0}
+                      </td>
+                    </tr>
+                    <tr>
+                      <td className="p-1">thr-dlq</td>
+                      <td className="p-1 text-right">
+                        {mx?.dlqCounts?.thr ?? 0}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </CardContent>
+            </Card>
+
+            {/* CloudWatch (si disponible) */}
+            <Card className="border-slate-800 bg-slate-900/50">
+              <CardHeader className="pb-2 flex items-center justify-between">
+                <CardTitle className="text-slate-200">
+                  CloudWatch (última hora)
+                </CardTitle>
+                <div className="flex items-center gap-2">
+                  <select
+                    className={input}
+                    value={cwSel}
+                    onChange={(e) => {
+                      setCwSel(e.target.value);
+                      void loadCw(e.target.value);
+                    }}
+                  >
+                    {['demo-fulfill-sqs', 'demo-analytics-sqs', 'demo-thr'].map(
+                      (q) => (
+                        <option key={q} value={q}>
+                          {q}
+                        </option>
+                      )
+                    )}
+                  </select>
+                  <Button className={btnPrimary} onClick={() => loadCw(cwSel)}>
+                    Refrescar
+                  </Button>
+                </div>
+              </CardHeader>
+              <CardContent>
+                {!cwRows ? (
+                  <div className="text-sm text-slate-400">
+                    No disponible (LocalStack suele no exponer métricas de
+                    CloudWatch).
+                  </div>
+                ) : (
+                  <table className="w-full text-sm">
+                    <thead className="sticky top-0 bg-slate-900/60 text-sky-300">
+                      <tr>
+                        <th className="text-left p-2">Métrica</th>
+                        <th className="text-right p-2">Sum/Average</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {cwRows.map((r: any) => (
+                        <tr key={r.Id} className="border-t border-slate-800">
+                          <td className="p-2">{r.Id}</td>
+                          <td className="p-2 text-right">
+                            {(
+                              r.Values?.reduce(
+                                (a: number, b: number) => a + b,
+                                0
+                              ) ?? 0
+                            ).toFixed(0)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+                <div className="mt-2 text-xs text-slate-500">
+                  En AWS real: <code>sent/recv/del</code> ≈
+                  encolados/recibidos/eliminados; <code>vis/nvis</code> ≈
+                  mensajes visibles / no visibles.
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <Button variant="secondary" onClick={() => loadMetricsAll()}>
+              Refrescar KPIs
+            </Button>
+            <div className="text-xs text-slate-500">
+              Fuente: snapshot SQS + conteos por archivos en S3 (
+              <code>{mx?.bucket || '-'}</code>).
+            </div>
+          </div>
         </TabsContent>
 
         {/* ===== MENSAJERÍA ===== */}
