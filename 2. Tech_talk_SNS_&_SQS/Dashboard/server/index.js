@@ -334,8 +334,10 @@ app.get('/queues', async (_req, res) => {
   const names = [
     'demo-fulfill-sqs',
     'demo-analytics-sqs',
+    'demo-shipping-sqs',
     'demo-fulfill-sqs-dlq',
     'demo-analytics-sqs-dlq',
+    'demo-shipping-sqs-dlq',
     'demo-thr',
     'demo-thr-dlq',
   ];
@@ -463,6 +465,7 @@ app.post('/seed/fanout-trace', async (_req, res) => {
       analytics:
         ['OrderPlaced', 'OrderShipped'].includes(e.eventType) &&
         e.priority === 'high',
+      shipping: ['OrderPlaced'].includes(e.eventType) && e.priority === 'high',
     });
     await sns.send(
       new PublishCommand({
@@ -794,9 +797,11 @@ app.get('/metrics', async (_req, res) => {
     const queueNames = [
       'demo-fulfill-sqs',
       'demo-analytics-sqs',
+      'demo-shipping-sqs',
       'demo-thr',
       'demo-fulfill-sqs-dlq',
       'demo-analytics-sqs-dlq',
+      'demo-shipping-sqs-dlq',
       'demo-thr-dlq',
     ];
     const queues = await Promise.all(
@@ -812,6 +817,8 @@ app.get('/metrics', async (_req, res) => {
       f_done: countBySuffix(tkeys, '20-fulfillment-processed.json'),
       a_recv: countBySuffix(tkeys, '11-analytics-received.json'),
       a_done: countBySuffix(tkeys, '21-analytics-processed.json'),
+      s_recv: countBySuffix(tkeys, '12-shipping-received.json'), 
+      s_done: countBySuffix(tkeys, '22-shipping-processed.json'),
     };
 
     // 3) “procesados OK” = artefactos generados en S3
@@ -887,18 +894,13 @@ app.get('/cw/sqs/:queue/summary', async (req, res) => {
   }
 });
 
-// al tope ya tenés SQSClient y GetQueueUrlCommand
-import fetch from "node-fetch"; // si usas Node <18 o CommonJS
-// en ESM con Node >=18 podés usar global fetch
-
-
 // backdoor para ver mensajes en una Queue SQS (peek) - Localstack docs
 app.get('/peek/:queue', async (req, res) => {
   try {
     // 1) Resolvemos la QueueUrl “real”
-    const QueueUrl = await sqs.send(
-      new GetQueueUrlCommand({ QueueName: req.params.queue })
-    ).then(r => r.QueueUrl);
+    const QueueUrl = await sqs
+      .send(new GetQueueUrlCommand({ QueueName: req.params.queue }))
+      .then((r) => r.QueueUrl);
 
     // 2) Armamos URL del backdoor (peek)
     const url = new URL('http://localhost:4566/_aws/sqs/messages');
@@ -909,17 +911,22 @@ app.get('/peek/:queue', async (req, res) => {
       url.searchParams.set('ShowDelayed', 'true');
     }
 
-    const r = await fetch(url.toString(), { headers: { Accept: 'application/json' } });
+    const r = await fetch(url.toString(), {
+      headers: { Accept: 'application/json' },
+    });
     const json = await r.json();
 
     // La forma JSON puede venir envuelta: normalizamos a array de mensajes
-    const msgs = json?.ReceiveMessageResponse?.ReceiveMessageResult?.Message ?? json?.Messages ?? json ?? [];
+    const msgs =
+      json?.ReceiveMessageResponse?.ReceiveMessageResult?.Message ??
+      json?.Messages ??
+      json ??
+      [];
     res.json(Array.isArray(msgs) ? msgs : [msgs]);
   } catch (e) {
     res.status(500).json({ error: String(e) });
   }
 });
-
 
 // ----------------------- Start -----------------------
 (async () => {

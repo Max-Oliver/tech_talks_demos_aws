@@ -25,7 +25,9 @@ build-zips: ensure-bucket
 > mkdir -p .dist
 > cd ./Dashboard/src/workers/fanout && zip -q -r ../../../../.dist/fanout_fulfillment.zip fulfillment_worker.py ../../utils/log.py
 > cd ./Dashboard/src/workers/fanout && zip -q -r ../../../../.dist/fanout_analytics.zip   analytics_worker.py   ../../utils/log.py
+> cd ./Dashboard/src/workers/fanout && zip -q -r ../../../../.dist/fanout_shipping.zip       shipping_worker.py ../../utils/log.py
 > cd ./Dashboard/src/workers/throttling-dlq && zip -q -r ../../../../.dist/throttling_worker.zip stressed_worker.py ../../utils/log.py
+> $(awslocal) s3 cp .dist/fanout_shipping.zip    s3://$(CF_BUCKET)/
 > $(awslocal) s3 cp .dist/fanout_fulfillment.zip s3://$(CF_BUCKET)/
 > $(awslocal) s3 cp .dist/fanout_analytics.zip   s3://$(CF_BUCKET)/
 > $(awslocal) s3 cp .dist/throttling_worker.zip  s3://$(CF_BUCKET)/
@@ -51,6 +53,8 @@ deploy-fanout:
 > # asegura envs correctas (endpoint dentro del contenedor)
 > $(awslocal) lambda update-function-configuration --function-name demo-fanout-fulfillment --environment "Variables={APP_NAME=fanout,DATA_BUCKET=$(DATA_BUCKET),AWS_ENDPOINT_URL=http://localstack:4566}" >/dev/null
 > $(awslocal) lambda update-function-configuration --function-name demo-fanout-analytics   --environment "Variables={APP_NAME=fanout,DATA_BUCKET=$(DATA_BUCKET),AWS_ENDPOINT_URL=http://localstack:4566}" >/dev/null
+>	$(awslocal) lambda update-function-configuration --function-name demo-fanout-shipping    --environment "Variables={APP_NAME=fanout,DATA_BUCKET=$(DATA_BUCKET),AWS_ENDPOINT_URL=http://localstack:4566}" >/dev/null
+
 
 deploy-thr:
 > $(call cfn_deploy,demo-thr,infra/throttling.yml)
@@ -67,6 +71,9 @@ logs-fulfillment:
 
 logs-analytics:
 > $(awslocal) logs tail /aws/lambda/demo-fanout-analytics --follow
+
+logs-shipping:
+> $(awslocal) logs tail /aws/lambda/demo-fanout-shipping --follow
 
 logs-thr:
 > $(awslocal) logs tail /aws/lambda/demo-thr-proc --follow

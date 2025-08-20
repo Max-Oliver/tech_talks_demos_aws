@@ -27,15 +27,8 @@ import { TopNav } from '@/components/TopNav';
 import { traceJsonToHtml, TraceResponse } from '../helpers/TraceToJsonHtml';
 import { TraceTimeline } from '../helpers/TraceTimline';
 import { DlqMini } from '@/components/DlqMini';
-import { cx } from '@/lib/cxColors';
-import {
-  Camera,
-  ListFilterPlus,
-  ListX,
-  LucideArrowDownToDot,
-  LucideRemoveFormatting,
-} from 'lucide-react';
-import { loadMetricsAll } from '@/components/KpiMetrics';
+
+import { ListFilterPlus, ListX } from 'lucide-react';
 
 export const API = process.env.NEXT_PUBLIC_API || 'http://localhost:4000';
 
@@ -54,6 +47,8 @@ type TraceSummary = {
   f_done?: boolean; // 20
   a_recv?: boolean; // 11
   a_done?: boolean; // 21
+  s_recv?: boolean; // 12
+  s_done?: boolean; // 22
   routes?: any;
   ts?: number; // timestamp de última act.
 };
@@ -174,6 +169,7 @@ export default function MonitoringPage() {
   const [traces, setTraces] = React.useState<TraceSummary[]>([]);
   const [s3Orders, setS3Orders] = React.useState<string[]>([]);
   const [s3Analytics, setS3Analytics] = React.useState<string[]>([]);
+  const [s3Shipping, setS3Shipping] = React.useState<string[]>([]);
   const [detail, setDetail] = React.useState<string>('');
 
   // “badges” auxiliares
@@ -303,15 +299,17 @@ export default function MonitoringPage() {
   const refresh = React.useCallback(async () => {
     setLoading(true);
     try {
-      const [qs, ord, anl, ts] = await Promise.all([
+      const [qs, ord, anl, shp, ts] = await Promise.all([
         fetchSafe<QueueStat[]>(`${API}/queues`),
         fetchSafe<string[]>(`${API}/files?prefix=orders/`),
         fetchSafe<string[]>(`${API}/files?prefix=analytics/`),
+        fetchSafe<string[]>(`${API}/files?prefix=shipping/`),
         fetchSafe<TraceSummary[]>(`${API}/traces`),
       ]);
       setQueues(qs);
       setS3Orders(ord);
       setS3Analytics(anl);
+      setS3Shipping(shp);
       // Ordena por ts desc si hay; si no, deja última posición como “más nueva”
       setTraces(ts.slice().sort((a, b) => (b.ts ?? 0) - (a.ts ?? 0)));
       // dominio
@@ -767,6 +765,9 @@ export default function MonitoringPage() {
                       <th className="text-center p-2">Published</th>
                       <th className="text-center p-2">Route→Ful</th>
                       <th className="text-center p-2">Route→Met</th>
+                      <th className="text-center p-2">Route→Ship</th>
+                      <th className="text-center p-2">Recv Ship</th>
+                      <th className="text-center p-2">Done Ship</th>
                       <th className="text-center p-2">Recv Ful</th>
                       <th className="text-center p-2">Done Ful</th>
                       <th className="text-center p-2">Recv Met</th>
@@ -778,6 +779,8 @@ export default function MonitoringPage() {
                     {traces.slice(0, 25).map((t) => {
                       const routeF = t.routes ? true : t.f_recv || t.f_done;
                       const routeA = t.routes ? true : t.a_recv || t.a_done;
+                      const routeS = t.routes ? true : t.s_recv || t.s_done; // 👈 NUEVO
+
                       return (
                         <tr key={t.id} className="border-t border-slate-800">
                           <td className="p-2">
@@ -786,6 +789,11 @@ export default function MonitoringPage() {
                           <td className="text-center">{dot(t.published)}</td>
                           <td className="text-center">{dot(!!routeF)}</td>
                           <td className="text-center">{dot(!!routeA)}</td>
+
+                          <td className="text-center">{dot(!!routeS)}</td>
+                          <td className="text-center">{dot(t.s_recv)}</td>
+                          <td className="text-center">{dot(t.s_done)}</td>
+
                           <td className="text-center">{dot(t.f_recv)}</td>
                           <td className="text-center">{dot(t.f_done)}</td>
                           <td className="text-center">{dot(t.a_recv)}</td>
@@ -1750,7 +1758,7 @@ export default function MonitoringPage() {
 
         {/* ===== ALMACENAMIENTO ===== */}
         <TabsContent value="storage" className="space-y-4">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <Card className="border-slate-800 bg-slate-900/50">
               <CardHeader className="pb-2">
                 <CardTitle className="text-slate-200">S3 — Orders</CardTitle>
@@ -1775,6 +1783,25 @@ export default function MonitoringPage() {
               </CardHeader>
               <CardContent className="max-h-[60vh] overflow-auto">
                 {s3Analytics.slice(0, 100).map((k) => (
+                  <div key={k} className="break-all">
+                    <a
+                      className="underline"
+                      href={`${API}/file?key=${encodeURIComponent(k)}`}
+                      target="_blank"
+                    >
+                      {k}
+                    </a>
+                  </div>
+                ))}
+              </CardContent>
+            </Card>
+          
+            <Card className="border-slate-800 bg-slate-900/50">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-slate-200">S3 — Shipping</CardTitle>
+              </CardHeader>
+              <CardContent className="max-h-[60vh] overflow-auto">
+                {s3Shipping.slice(0, 100).map((k) => (
                   <div key={k} className="break-all">
                     <a
                       className="underline"
