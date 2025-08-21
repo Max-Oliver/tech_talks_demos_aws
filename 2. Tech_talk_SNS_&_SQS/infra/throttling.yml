@@ -1,5 +1,5 @@
-AWSTemplateFormatVersion: "2010-09-09"
-Description: "SQS throttling + Lambda (concurrency=1 + DLQ)"
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'SQS throttling + Lambda (concurrency=1 + DLQ)'
 Parameters:
   CodeBucket: { Type: String, Default: cf-code }
 
@@ -23,7 +23,7 @@ Resources:
     Properties:
       RoleName: demo-thr-role
       AssumeRolePolicyDocument:
-        Version: "2012-10-17"
+        Version: '2012-10-17'
         Statement:
           - Effect: Allow
             Principal: { Service: lambda.amazonaws.com }
@@ -31,28 +31,35 @@ Resources:
       Policies:
         - PolicyName: lambda-logs-sqs
           PolicyDocument:
-            Version: "2012-10-17"
+            Version: '2012-10-17'
             Statement:
               - Effect: Allow
-                Action: [ logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents ]
-                Resource: "arn:aws:logs:*:*:*"
+                Action:
+                  [logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents]
+                Resource: 'arn:aws:logs:*:*:*'
               - Effect: Allow
-                Action: [ sqs:ReceiveMessage, sqs:DeleteMessage, sqs:GetQueueAttributes ]
-                Resource: "*"
+                Action:
+                  [
+                    sqs:ReceiveMessage,
+                    sqs:DeleteMessage,
+                    sqs:GetQueueAttributes,
+                  ]
+                Resource: '*'
 
   ThrProc:
     Type: AWS::Lambda::Function
     Properties:
       FunctionName: demo-thr-proc
       Runtime: python3.11
-      Handler: worker_stressed.handler
+      Handler: stressed_worker.handler
       Role: !GetAtt LambdaRole.Arn
       Timeout: 10
       ReservedConcurrentExecutions: 1
       Environment:
         Variables:
-          FAIL_RATIO: "0.3"
-          SLEEP_MS: "2000"
+          FAIL_RATIO: '0.30'
+          SLEEP_MS: '1200'
+          JITTER_MS: '400'
       Code:
         S3Bucket: !Ref CodeBucket
         S3Key: throttling_worker.zip
@@ -64,4 +71,6 @@ Resources:
       FunctionName: !Ref ThrProc
       BatchSize: 10
       MaximumBatchingWindowInSeconds: 1
+      FunctionResponseTypes:
+        - ReportBatchItemFailures # 👈 habilita partial batch response
       Enabled: true

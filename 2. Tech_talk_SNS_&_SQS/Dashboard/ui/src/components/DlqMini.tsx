@@ -3,6 +3,7 @@
 import React from "react";
 import { Button } from "./ui/button";
 import { fetchSafe, API } from "@/app/monitor/page";
+import { btnGhost, btnPrimary } from "@/lib/utils";
 
 export function DlqMini() {
   const [queue, setQueue] = React.useState('demo-thr-dlq');
@@ -44,6 +45,7 @@ export function DlqMini() {
           onChange={(e) => setQueue(e.target.value)}
         >
           <option>demo-thr-dlq</option>
+          <option>demo-shipping-sqs-dlq</option>
           <option>demo-analytics-sqs-dlq</option>
           <option>demo-fulfill-sqs-dlq</option>
         </select>
@@ -55,9 +57,10 @@ export function DlqMini() {
         >
           <option>demo-thr</option>
           <option>demo-analytics-sqs</option>
+          <option>demo-shipping-sqs</option>
           <option>demo-fulfill-sqs</option>
         </select>
-        <Button variant="secondary" onClick={load} disabled={loading}>Refrescar</Button>
+        <Button className={btnGhost} onClick={load} disabled={loading}>Refrescar</Button>
         <Button variant="outline" onClick={purge} disabled={loading}>Purgar</Button>
       </div>
 
@@ -68,7 +71,7 @@ export function DlqMini() {
           <li key={m.id} className="border border-slate-800 rounded p-2">
             <div className="flex items-center justify-between gap-3">
               <div className="text-slate-300">{m.id}</div>
-              <Button size="sm" onClick={() => retryOne(m)}>
+              <Button className={btnPrimary} size="sm" onClick={() => retryOne(m)}>
                 Reintentar → {source}
               </Button>
             </div>

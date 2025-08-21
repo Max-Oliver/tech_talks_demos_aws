@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-expressions */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 // app/visualizer/page.tsx
 'use client';
@@ -18,6 +19,10 @@ import { Badge } from '@/components/ui/badge';
 import { Slider } from '@/components/ui/slider';
 import { TopNav } from '@/components/TopNav';
 import { API, fetchSafe } from '../monitor/page';
+import { useMemo, useState } from 'react';
+import { toast } from 'react-hot-toast';
+import { btnBase, btnGhost, btnPrimary, btnSoft, btnToggle } from '@/lib/utils';
+import { ToggleGroup } from '@/components/ui/Toggle-pill';
 
 const cn = (...xs: (string | false | null | undefined)[]) =>
   xs.filter(Boolean).join(' ');
@@ -110,6 +115,25 @@ export default function FanoutVisualizer() {
   }, [snaps]);
   const snap = snaps[cursor];
 
+  const [replayCid, setReplayCid] = useState('');
+
+  const [loading, setLoading] = useState(false);
+  const [currentCID, setCurrentCID] = useState('');
+
+  // estados de fallas (reemplazá los actuales)
+  const [failP, setFailP] = useState(false); // Pagos
+  const [failI, setFailI] = useState(false); // Inventario
+  const [failS, setFailS] = useState(false); // Shipping
+
+  // servicios seleccionados para forzar DLQ
+  const services = useMemo(
+    () =>
+      [failP && 'pagos', failI && 'inv', failS && 'ship'].filter(
+        Boolean
+      ) as WorkerKey[],
+    [failP, failI, failS]
+  );
+
   // controles
   const [run, setRun] = React.useState<RunConfig>({
     auto: false,
@@ -156,6 +180,50 @@ export default function FanoutVisualizer() {
     setQueues(s.queues);
     setLog(s.log ?? []);
   }, []);
+
+  // --- CID helpers ---
+  async function pasteCid() {
+    try {
+      const txt = await navigator.clipboard?.readText();
+      if (txt) setReplayCid(txt.trim());
+    } catch {
+      /* noop */
+    }
+  }
+
+  async function doReplay(mode: 'success' | 'dlq') {
+    const cid = replayCid.trim();
+    if (!cid) {
+      toast.error('Ingresá un CorrelationId');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const r = await fetch(`${API}/replay/${encodeURIComponent(cid)}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          mode,
+          // mandamos *los mismos* identificadores que usa el visualizador
+          services, // ['pagos','inv','ship']
+          reuseCid: false,
+        }),
+      });
+      const out = await r.json();
+      if (!r.ok) throw new Error(out?.error || 'Replay falló');
+
+      const newCid = out?.newCorrelationId || cid;
+      setCurrentCID(newCid);
+      // Traigo el payload del nuevo CID y corro la animación (éxito o DLQ)
+      await startFromCid(newCid, mode === 'dlq', services);
+      toast.success(`Reproducido ${mode === 'dlq' ? '→ DLQ' : 'con éxito'}`);
+    } catch (e: any) {
+      toast.error(String(e?.message || e));
+    } finally {
+      setLoading(false);
+    }
+  }
 
   // seed inicial sin cid/payload en URL (evita hydration issues)
   React.useEffect(() => {
@@ -310,6 +378,56 @@ export default function FanoutVisualizer() {
     }
   }
 
+  async function startFromCid(
+    cid: string,
+    asDlq: boolean,
+    dlqServices: WorkerKey[]
+  ) {
+    const p = await fetchPublishedPayloadByCid(cid);
+    if (!p) {
+      toast.error('CID no encontrado o sin payload');
+      return;
+    }
+
+    // mapear a FailMode del visualizador
+    const fm: FailMode = asDlq
+      ? dlqServices.length === 3
+        ? 'all'
+        : dlqServices[0] ?? 'none'
+      : 'none';
+
+    const seq = buildSnapshots(p, { failMode: fm });
+    setSnaps(seq);
+    setCursor(0);
+    applySnap(seq[0]);
+    setLog([]);
+
+    // arrancá en auto
+    setRun((r) => ({ ...r, auto: true }));
+    if (seq.length > 1) {
+      requestAnimationFrame(() => {
+        setCursor(1);
+        applySnap(seq[1]);
+      });
+    }
+  }
+
+  async function refresh(targetCid?: string) {
+    const cid = (targetCid || currentCID || replayCid || '').trim();
+    if (!cid) {
+      toast('Ingresá un CID');
+      return;
+    }
+    setLoading(true);
+    try {
+      await startFromCid(cid, false, []);
+      setCurrentCID(cid);
+      toast('Refrescado');
+    } finally {
+      setLoading(false);
+    }
+  }
+
   // buildSnapshots (compat firma vieja y nueva)
   function buildSnapshots(
     payload: any,
@@ -428,6 +546,33 @@ export default function FanoutVisualizer() {
       minute: '2-digit',
       second: '2-digit',
     });
+
+  function PillCheck({
+    checked,
+    onChange,
+    children,
+  }: {
+    checked: boolean;
+    onChange: (v: boolean) => void;
+    children: React.ReactNode;
+  }) {
+    return (
+      <button
+        type="button"
+        aria-pressed={checked}
+        onClick={() => onChange(!checked)}
+        className={cn(
+          'h-8 px-3 rounded-full border text-xs transition focus:outline-none',
+          'border-slate-600/60 bg-slate-900/60 text-slate-200 hover:bg-slate-800',
+          'focus-visible:ring-2 focus-visible:ring-indigo-500/40',
+          checked &&
+            'border-emerald-500/60 text-emerald-100 bg-emerald-600/20 shadow-[0_0_0_1px_rgba(16,185,129,.35)_inset]'
+        )}
+      >
+        {children}
+      </button>
+    );
+  }
 
   // ===== Render
   return (
@@ -594,28 +739,57 @@ export default function FanoutVisualizer() {
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="flex flex-col gap-3">
-                  <div className="flex gap-2">
+                  <div className="flex flex-wrap gap-2">
                     <Button
-                      onClick={() => {
-                        if (run.auto) setRun((r) => ({ ...r, auto: false }));
-                        else ensureSequenceAndMaybeAuto(true);
-                      }}
+                      className={cn(
+                        btnBase,
+                        run.auto
+                          ? 'bg-blue-300 hover:bg-blue-400 text-white'
+                          : btnPrimary
+                      )}
+                      onClick={() =>
+                        run.auto
+                          ? setRun((r) => ({ ...r, auto: false }))
+                          : ensureSequenceAndMaybeAuto(true)
+                      }
                     >
                       {run.auto ? '⏸️ Auto' : '▶️ Auto'}
                     </Button>
-                    <Button onClick={stepNext}>⏭️ Step</Button>
-                    <Button onClick={stepPrev} disabled={cursor === 0}>
+
+                    <Button className={cn(btnBase, btnSoft)} onClick={stepNext}>
+                      ⏭️ Step
+                    </Button>
+                    <Button
+                      className={cn(btnBase, btnSoft)}
+                      onClick={stepPrev}
+                      disabled={cursor === 0}
+                    >
                       ⏮️ Atrás
                     </Button>
-                    <Button onClick={() => hardReset({ keepPayload: true })}>
+                    <Button
+                      className={cn(btnBase, btnSoft)}
+                      onClick={() => hardReset({ keepPayload: true })}
+                    >
                       🔄 Reset
+                    </Button>
+                    <Button
+                      className={cn(btnBase, btnSoft)}
+                      onClick={() => refresh()}
+                      disabled={loading}
+                    >
+                      {loading ? 'Refrescando…' : 'Refresh'}
                     </Button>
                   </div>
 
                   <div>
-                    <div className="text-xs text-slate-400 mb-1">Velocidad</div>
+                    <div className="flex items-center justify-between mb-1">
+                      <div className="text-xs text-slate-400">Velocidad</div>
+                      <div className="text-xs tabular-nums text-slate-300">
+                        {run.speedMs} ms
+                      </div>
+                    </div>
                     <Slider
-                      defaultValue={[run.speedMs]}
+                      value={[run.speedMs]}
                       min={250}
                       max={2000}
                       step={50}
@@ -625,22 +799,20 @@ export default function FanoutVisualizer() {
                     />
                   </div>
 
-                  <div className="flex flex-wrap items-center gap-2">
-                    <div className="text-xs text-slate-400 mr-2">
-                      Forzar DLQ:
-                    </div>
-                    {(['none', 'pagos', 'inv', 'ship', 'all'] as const).map(
-                      (v) => (
-                        <Button
-                          key={v}
-                          size="sm"
-                          variant={forceDlq === v ? 'default' : 'outline'}
-                          onClick={() => setForceDlq(v)}
-                        >
-                          {v === 'none' ? 'ninguna' : v.toUpperCase()}
-                        </Button>
-                      )
-                    )}
+                  <div className="space-y-2">
+                    <div className="text-xs text-slate-400">Forzar DLQ:</div>
+                    <ToggleGroup
+                      ariaLabel="Forzar DLQ"
+                      value={forceDlq}
+                      onChange={setForceDlq}
+                      options={[
+                        { value: 'none', label: 'ninguna' },
+                        { value: 'pagos', label: 'PAGOS' },
+                        { value: 'inv', label: 'INV' },
+                        { value: 'ship', label: 'SHIP' },
+                        { value: 'all', label: 'ALL' },
+                      ]}
+                    />
                   </div>
 
                   <div className="flex items-center gap-2 text-xs text-slate-300 mt-2">
@@ -689,6 +861,77 @@ export default function FanoutVisualizer() {
                 </CardContent>
               </Card>
 
+              {/*  Replay by cid */}
+              <Card className="border-slate-800 bg-slate-900/40">
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-sm text-slate-300">
+                    Reproducir por CID
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <div className="flex gap-2">
+                    <input
+                      className="flex-1 h-9 rounded-md border border-slate-700 bg-[#0f172a] px-3 text-sm text-slate-200"
+                      placeholder="Pega aquí el CorrelationId…"
+                      value={replayCid}
+                      onChange={(e) => setReplayCid(e.target.value)}
+                    />
+                    <Button
+                      variant="outline"
+                      className="h-9"
+                      onClick={pasteCid}
+                    >
+                      Pegar
+                    </Button>
+                    <Button
+                      className="h-9"
+                      onClick={() => refresh(replayCid)}
+                      disabled={loading}
+                    >
+                      {loading ? 'Refrescando…' : 'Refresh'}
+                    </Button>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2 text-xs text-slate-300">
+                    <span className="mr-2">Forzar DLQ en:</span>
+                    <PillCheck checked={failP} onChange={setFailP}>
+                      Fulfillment
+                    </PillCheck>
+                    <PillCheck checked={failI} onChange={setFailI}>
+                      Analytics
+                    </PillCheck>
+                    <PillCheck checked={failS} onChange={setFailS}>
+                      Shipping
+                    </PillCheck>
+                  </div>
+
+                  <div className="flex gap-2">
+                    <Button
+                      className="h-9 px-4"
+                      disabled={loading || !replayCid.trim()}
+                      onClick={() => doReplay('success')}
+                    >
+                      ▶️ Reproducir (éxito)
+                    </Button>
+                    <Button
+                      className="h-9 px-4 bg-rose-600 hover:bg-rose-700 text-white"
+                      disabled={loading || !replayCid.trim()}
+                      onClick={() => doReplay('dlq')}
+                    >
+                      ⚠️ Forzar DLQ
+                    </Button>
+                  </div>
+
+                  {currentCID && (
+                    <div className="text-xs text-slate-400">
+                      <span className="mr-2">Último CID reproducido:</span>
+                      <code className="break-all">{currentCID}</code>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+
+              {/* Payload y Log */}
               <Card className="border-slate-800 bg-slate-900/40">
                 <CardHeader className="pb-2">
                   <CardTitle className="text-sm text-slate-300">

@@ -454,10 +454,6 @@ export default function MonitoringPage() {
     0
   );
 
-  console.log('Total evnts: ', totalMsgs);
-  console.log('Total Events Ready: ', readyTotal);
-  console.log('Total DLQ Events: ', dlqTotal);
-
   const [orderNo, setOrderNo] = React.useState<string>('');
   const [corrNo, setCorrNo] = React.useState<string>('');
   const [sel, setSel] = React.useState<string>(''); // productId
@@ -655,7 +651,7 @@ export default function MonitoringPage() {
                 onChange={(e) => setCidAndURL(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && goToTrace()}
               />
-              <Button variant="secondary" onClick={() => goToTrace()}>
+              <Button className={btnPrimary} onClick={() => goToTrace()}>
                 Ver
               </Button>
             </div>
@@ -689,7 +685,7 @@ export default function MonitoringPage() {
               return (
                 <>
                   {cards.map(([k, v], i) => (
-                    <Card key={i} className="border-slate-800 bg-slate-900/50">
+                    <Card key={i} className="border-slate-800 bg-slate-800/50">
                       <CardContent className="p-4">
                         <div className="text-slate-400 text-xs">{k}</div>
                         <div className="text-2xl font-semibold">{v as any}</div>
@@ -701,158 +697,216 @@ export default function MonitoringPage() {
             })()}
           </div>
 
-          <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-            {/* Salud de colas */}
-            <Card className="border-slate-800 bg-slate-900/50">
-              <CardHeader className="pb-2">
-                <CardTitle className="text-slate-200">
-                  Eventos en tránsito
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="max-h-[40vh] overflow-auto">
-                <table className="w-full text-sm">
-                  <thead className="sticky top-0 bg-slate-900/60 text-sky-300">
-                    <tr>
-                      <th className="text-left p-2">Queue</th>
-                      <th className="text-center p-2">Ready</th>
-                      <th className="text-center p-2">In-Flight</th>
-                      <th className="text-center p-2">Delayed</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {queues.map((q) => {
-                      const isFocus = /^(demo-thr|demo-thr-dlq)$/i.test(q.name); // 💙 objetivo
-                      const changed = !!qChanged[q.name];
-                      return (
-                        <tr
-                          key={q.name}
-                          className={cx(
-                            'border-t border-slate-800 transition',
-                            isFocus && 'bg-sky-950/20', // fondo azulado
-                            changed && 'animate-pulse ring-1 ring-sky-500/40' // pulso cuando cambian números
-                          )}
-                        >
-                          <td className="p-2">
-                            <code className="break-all">{q.name}</code>
-                          </td>
-                          <td className="text-center p-2">
-                            {q.ApproximateNumberOfMessages || 0}
-                          </td>
-                          <td className="text-center p-2">
-                            {q.ApproximateNumberOfMessagesNotVisible || 0}
-                          </td>
-                          <td className="text-center p-2">
-                            {q.ApproximateNumberOfMessagesDelayed || 0}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </CardContent>
-            </Card>
-
+          <div className="grid grid-cols-1 gap-4">
             {/* Últimas trazas */}
-            <Card className="border-slate-800 bg-slate-900/50">
+            <Card className="min-w-0 border-slate-800 bg-slate-900/50">
               <CardHeader className="pb-2">
                 <CardTitle className="text-slate-200">Últimas trazas</CardTitle>
               </CardHeader>
-              <CardContent className="max-h-[40vh] overflow-auto">
-                <table className="w-full text-sm">
-                  <thead className="sticky top-0 bg-slate-900/60 text-sky-300">
-                    <tr>
-                      <th className="text-left p-2">CorrelationId</th>
-                      <th className="text-center p-2">Published</th>
-                      <th className="text-center p-2">Route→Ful</th>
-                      <th className="text-center p-2">Route→Met</th>
-                      <th className="text-center p-2">Route→Ship</th>
-                      <th className="text-center p-2">Recv Ship</th>
-                      <th className="text-center p-2">Done Ship</th>
-                      <th className="text-center p-2">Recv Ful</th>
-                      <th className="text-center p-2">Done Ful</th>
-                      <th className="text-center p-2">Recv Met</th>
-                      <th className="text-center p-2">Done Met</th>
-                      <th />
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {traces.slice(0, 25).map((t) => {
-                      const routeF = t.routes ? true : t.f_recv || t.f_done;
-                      const routeA = t.routes ? true : t.a_recv || t.a_done;
-                      const routeS = t.routes ? true : t.s_recv || t.s_done; // 👈 NUEVO
 
-                      return (
-                        <tr key={t.id} className="border-t border-slate-800">
-                          <td className="p-2">
-                            <code className="break-all">{t.id}</code>
-                          </td>
-                          <td className="text-center">{dot(t.published)}</td>
-                          <td className="text-center">{dot(!!routeF)}</td>
-                          <td className="text-center">{dot(!!routeA)}</td>
+              {/* 👇 contenedor con scroll horizontal + vertical */}
+              <CardContent className="max-h-[40vh] overflow-hidden">
+                <div className="overflow-x-auto overflow-y-auto max-h-[40vh]">
+                  <table className="table-fixed min-w-[1200px] w-full text-sm">
+                    <colgroup>
+                      <col className="w-[36ch]" /> {/* CID */}
+                      <col className="w-[8ch]" /> {/* Published */}
+                      <col className="w-[10ch]" /> {/* R→Ful */}
+                      <col className="w-[10ch]" /> {/* R→Met */}
+                      <col className="w-[12ch]" /> {/* R→Ship */}
+                      <col className="w-[10ch]" /> {/* Recv Ship */}
+                      <col className="w-[10ch]" /> {/* Done Ship */}
+                      <col className="w-[10ch]" /> {/* Recv Ful */}
+                      <col className="w-[10ch]" /> {/* Done Ful */}
+                      <col className="w-[10ch]" /> {/* Recv Met */}
+                      <col className="w-[10ch]" /> {/* Done Met */}
+                      <col className="w-[16ch]" /> {/* acciones */}
+                    </colgroup>
 
-                          <td className="text-center">{dot(!!routeS)}</td>
-                          <td className="text-center">{dot(t.s_recv)}</td>
-                          <td className="text-center">{dot(t.s_done)}</td>
+                    <thead className="sticky top-0 bg-slate-900/60 text-sky-300">
+                      <tr>
+                        <th className="text-left p-2">CorrelationId</th>
+                        <th className="text-center p-2 whitespace-nowrap">
+                          Published
+                        </th>
+                        <th className="text-center p-2 whitespace-nowrap">
+                          Route→Ful
+                        </th>
+                        <th className="text-center p-2 whitespace-nowrap">
+                          Route→Met
+                        </th>
+                        <th className="text-center p-2 whitespace-nowrap">
+                          Route→Ship
+                        </th>
+                        <th className="text-center p-2 whitespace-nowrap">
+                          Recv Ship
+                        </th>
+                        <th className="text-center p-2 whitespace-nowrap">
+                          Done Ship
+                        </th>
+                        <th className="text-center p-2 whitespace-nowrap">
+                          Recv Ful
+                        </th>
+                        <th className="text-center p-2 whitespace-nowrap">
+                          Done Ful
+                        </th>
+                        <th className="text-center p-2 whitespace-nowrap">
+                          Recv Met
+                        </th>
+                        <th className="text-center p-2 whitespace-nowrap">
+                          Done Met
+                        </th>
+                        <th />
+                      </tr>
+                    </thead>
 
-                          <td className="text-center">{dot(t.f_recv)}</td>
-                          <td className="text-center">{dot(t.f_done)}</td>
-                          <td className="text-center">{dot(t.a_recv)}</td>
-                          <td className="text-center">{dot(t.a_done)}</td>
-                          <td className="text-center">
-                            <div className="flex gap-2 justify-end">
-                              <Button
-                                variant="secondary"
-                                className="h-8 px-3"
-                                onClick={() => showTraceInline(t.id)}
-                              >
-                                Ver
-                              </Button>
-                              <Button
-                                className="h-8 px-3"
-                                onClick={() => replayByCid(t.id)}
-                              >
-                                Reproducir
-                              </Button>
-                            </div>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+                    <tbody>
+                      {traces.slice(0, 25).map((t) => {
+                        const routeF = t.routes ? true : t.f_recv || t.f_done;
+                        const routeA = t.routes ? true : t.a_recv || t.a_done;
+                        const routeS = t.routes ? true : t.s_recv || t.s_done;
+
+                        return (
+                          <tr key={t.id} className="border-t border-slate-800">
+                            {/* 👇 primera columna sticky para que el CID siempre se vea al scrollear horizontalmente */}
+                            <td className="p-2 left-0 bg-slate-900/80 backdrop-blur supports-[backdrop-filter]:bg-slate-900/60">
+                              <code className="break-all">{t.id}</code>
+                            </td>
+
+                            <td className="text-center">{dot(t.published)}</td>
+                            <td className="text-center">{dot(!!routeF)}</td>
+                            <td className="text-center">{dot(!!routeA)}</td>
+                            <td className="text-center">{dot(!!routeS)}</td>
+                            <td className="text-center">{dot(t.s_recv)}</td>
+                            <td className="text-center">{dot(t.s_done)}</td>
+                            <td className="text-center">{dot(t.f_recv)}</td>
+                            <td className="text-center">{dot(t.f_done)}</td>
+                            <td className="text-center">{dot(t.a_recv)}</td>
+                            <td className="text-center">{dot(t.a_done)}</td>
+                            <td className="text-center">
+                              <div className="flex gap-2 justify-end">
+                                <Button
+                                  className={btnGhost}
+                                  onClick={() => showTraceInline(t.id)}
+                                >
+                                  Ver
+                                </Button>
+                                <Button
+                                  className={btnPrimary}
+                                  onClick={() => replayByCid(t.id)}
+                                >
+                                  Reproducir
+                                </Button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
               </CardContent>
             </Card>
-          </div>
 
-          {/* Detalle debajo (como en el HTML original) */}
-          <Card
-            id="trace-detail"
-            ref={traceRef}
-            className="mt-4 border-slate-800 bg-slate-900/50"
-          >
-            <CardHeader className="pb-2 flex items-center justify-between">
-              <CardTitle className="text-slate-200">Detalle de traza</CardTitle>
-              <div className="flex items-center gap-2">
-                <PlayButton parsed={parsed} />
-                <Button variant="secondary" onClick={() => setDetail('')}>
-                  Limpiar
-                </Button>
-              </div>
-            </CardHeader>
-            <CardContent className="max-h-[70vh] overflow-auto">
-              {detail ? (
-                <>
-                  <TraceTimeline detailHtml={detailHtml} />
-                  <TraceAccordion
-                    detailHtml={detail}
-                    cidToHighlight={cidQuery || cidBadge}
-                  />
-                </>
-              ) : (
-                <em className="text-slate-400">Selecciona “Ver”.</em>
-              )}
-            </CardContent>
-          </Card>
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+              {/* Salud de colas */}
+              <Card className="min-w-0 border-slate-800 bg-slate-900/50">
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-slate-200">
+                    Eventos en tránsito
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="max-h-[40vh] overflow-y-auto">
+                  {/* tabla simple; si quieres, también puedes fijar colgroup aquí */}
+                  <table className="w-full table-fixed text-sm">
+                    <colgroup>
+                      <col className="w-[50%]" />
+                      <col className="w-[16%]" />
+                      <col className="w-[17%]" />
+                      <col className="w-[17%]" />
+                    </colgroup>
+                    <thead className="sticky top-0 bg-slate-900/60 text-sky-300">
+                      <tr>
+                        <th className="text-left p-2">Queue</th>
+                        <th className="text-center p-2 whitespace-nowrap">
+                          Ready
+                        </th>
+                        <th className="text-center p-2 whitespace-nowrap">
+                          In-Flight
+                        </th>
+                        <th className="text-center p-2 whitespace-nowrap">
+                          Delayed
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {queues.map((q) => {
+                        const isFocus = /^(demo-thr|demo-thr-dlq)$/i.test(
+                          q.name
+                        );
+                        const changed = !!qChanged[q.name];
+                        return (
+                          <tr
+                            key={q.name}
+                            className={cx(
+                              'border-t border-slate-800 transition',
+                              isFocus && 'bg-sky-950/20',
+                              changed && 'animate-pulse ring-1 ring-sky-500/40'
+                            )}
+                          >
+                            <td className="p-2">
+                              <code className="break-all">{q.name}</code>
+                            </td>
+                            <td className="text-center p-2">
+                              {q.ApproximateNumberOfMessages || 0}
+                            </td>
+                            <td className="text-center p-2">
+                              {q.ApproximateNumberOfMessagesNotVisible || 0}
+                            </td>
+                            <td className="text-center p-2">
+                              {q.ApproximateNumberOfMessagesDelayed || 0}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </CardContent>
+              </Card>
+
+              {/* Detalle debajo (como en el HTML original) */}
+              <Card
+                id="trace-detail"
+                ref={traceRef}
+                className=" border-slate-800 bg-slate-900/50"
+              >
+                <CardHeader className="pb-2 flex items-center justify-between">
+                  <CardTitle className="text-slate-200">
+                    Detalle de traza
+                  </CardTitle>
+                  <div className="flex items-center gap-2">
+                    <PlayButton parsed={parsed} />
+                    <Button variant="secondary" onClick={() => setDetail('')}>
+                      Limpiar
+                    </Button>
+                  </div>
+                </CardHeader>
+                <CardContent className="max-h-[70vh] overflow-auto">
+                  {detail ? (
+                    <>
+                      <TraceTimeline detailHtml={detailHtml} />
+                      <TraceAccordion
+                        detailHtml={detail}
+                        cidToHighlight={cidQuery || cidBadge}
+                      />
+                    </>
+                  ) : (
+                    <em className="text-slate-400">Selecciona “Ver”.</em>
+                  )}
+                </CardContent>
+              </Card>
+            </div>
+          </div>
         </TabsContent>
 
         {/* ===== PEDIDOS ===== */}
@@ -1795,7 +1849,7 @@ export default function MonitoringPage() {
                 ))}
               </CardContent>
             </Card>
-          
+
             <Card className="border-slate-800 bg-slate-900/50">
               <CardHeader className="pb-2">
                 <CardTitle className="text-slate-200">S3 — Shipping</CardTitle>

@@ -132,13 +132,24 @@ Resources:
             Version: "2012-10-17"
             Statement:
               - Effect: Allow
-                Action: [ logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents ]
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
                 Resource: "arn:aws:logs:*:*:*"
               - Effect: Allow
-                Action: [ sqs:ReceiveMessage, sqs:DeleteMessage, sqs:GetQueueAttributes ]
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                  - sqs:ChangeMessageVisibility   # 👈 Faltaba
+                  - sqs:GetQueueUrl               # 👈 Útil
                 Resource: "*"
               - Effect: Allow
-                Action: [ s3:PutObject, s3:GetObject, s3:ListBucket ]
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:ListBucket
                 Resource: "*"
 
   ProcFulfillment:
@@ -180,7 +191,7 @@ Resources:
     Properties:
       FunctionName: demo-fanout-shipping
       Runtime: python3.11
-      Handler: index.handler
+      Handler: shipping_worker.handler
       Role: !GetAtt LambdaRole.Arn
       Timeout: 30
       Environment:
@@ -215,6 +226,24 @@ Resources:
       FunctionName: !Ref ProcShipping
       BatchSize: 10
       Enabled: true
+  
+  LogFulfillment:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/demo-fanout-fulfillment
+      RetentionInDays: 3
+
+  LogAnalytics:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/demo-fanout-analytics
+      RetentionInDays: 3
+
+  LogShipping:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/demo-fanout-shipping
+      RetentionInDays: 3
   
 
 

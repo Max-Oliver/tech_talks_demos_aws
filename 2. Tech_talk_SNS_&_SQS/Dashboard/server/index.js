@@ -268,6 +268,14 @@ async function recordReplenishment({
   return obj;
 }
 
+// helper: lee el 00-published
+async function getPublished(cid) {
+  const obj = await s3.send(new GetObjectCommand({ Bucket: DATA_BUCKET, Key: `traces/${cid}/00-published.json` }));
+  const body = await obj.Body.transformToString();
+  return JSON.parse(body).message || JSON.parse(body);
+}
+
+
 // ----------------------- Endpoints -------------------
 // health
 app.get('/health', (_req, res) => res.json({ ok: true }));
@@ -480,6 +488,116 @@ app.post('/seed/fanout-trace', async (_req, res) => {
     ids.push(correlationId);
   }
   res.json({ ok: true, correlationIds: ids });
+});
+
+// POST /replay/:cid { mode: 'success'|'dlq', services?: ['fulfillment','analytics','shipping'], reuseCid?: boolean }
+app.post('/replay/:cid', async (req, res) => {
+  const parentCid = req.params.cid;
+  const { mode = 'success', services = ['fulfillment','analytics','shipping'], reuseCid = false } = req.body || {};
+
+  // 1) recuperar el payload original
+  const original = await getPublished(parentCid).catch(() => null);
+  if (!original) return res.status(404).json({ error: 'CID no encontrado' });
+
+  // 2) nuevo CID (o reutilizar)
+  const newCid = reuseCid ? parentCid : crypto.randomUUID();
+
+  // 3) preparar mensaje
+  const msg = { ...original, correlationId: newCid };
+  if (mode === 'dlq') {
+    msg.forceFail = services.length === 3 ? 'all' : services; // 👈 activa should_fail en lambdas
+  } else {
+    delete msg.forceFail;
+  }
+
+  // 4) calcular rutas (para traza 01-routes)
+  const routes = {
+    fulfillment: ['OrderPlaced','OrderUpdated'].includes(msg.eventType),
+    analytics:   ['OrderPlaced','OrderShipped'].includes(msg.eventType) && msg.priority === 'high',
+    shipping:    msg.eventType === 'OrderPlaced' && msg.priority === 'high',
+  };
+
+  // 5) escribir 00/01 y publicar a SNS
+  const topics = await sns.send(new ListTopicsCommand({}));
+  const arn = topics.Topics.find(t => t.TopicArn.endsWith(':demo-fanout-topic')).TopicArn;
+
+  await s3.send(new PutObjectCommand({
+    Bucket: DATA_BUCKET,
+    Key: `traces/${newCid}/00-published.json`,
+    Body: Buffer.from(JSON.stringify({ t: Date.now(), message: msg })),
+  }));
+  await s3.send(new PutObjectCommand({
+    Bucket: DATA_BUCKET,
+    Key: `traces/${newCid}/01-routes.json`,
+    Body: Buffer.from(JSON.stringify(routes)),
+  }));
+
+  await sns.send(new PublishCommand({
+    TopicArn: arn,
+    Message: JSON.stringify(msg),
+    MessageAttributes: {
+      eventType: { DataType: 'String', StringValue: msg.eventType },
+      priority:  { DataType: 'String', StringValue: msg.priority  },
+    }
+  }));
+
+  res.json({ ok: true, parentCid, newCorrelationId: newCid, mode, services });
+});
+
+// Devuelve el payload "publicado" de un CID, con fallbacks si falta 00-published.json
+app.get('/published/:cid', async (req, res) => {
+  const cid = req.params.cid;
+
+  // 1) intento directo: 00-published.json
+  try {
+    const obj = await s3.send(new GetObjectCommand({
+      Bucket: DATA_BUCKET,
+      Key: `traces/${cid}/00-published.json`
+    }));
+    const body = await obj.Body.transformToString();
+    const parsed = JSON.parse(body);
+    const msg = parsed?.message ?? parsed;
+    return res.json({ ok: true, cid, message: msg });
+  } catch (_) {
+    // seguimos a fallbacks
+  }
+
+  // 2) fallback: mirar /trace/:cid y buscar el mejor paso disponible
+  try {
+    const d = await s3.send(new ListObjectsV2Command({
+      Bucket: DATA_BUCKET, Prefix: `traces/${cid}/`
+    }));
+    const keys = (d.Contents || []).map(o => o.Key).sort();
+    if (!keys.length) return res.status(404).json({ ok:false, error:'CID sin traces' });
+
+    // prioridad: 00-published → cualquiera con "-received" → cualquiera con "processed" → el primero
+    const pick = (arr) => arr.length ? arr[0] : null;
+    const kPub = pick(keys.filter(k => /00-published\.json$/.test(k)));
+    const kRecv = pick(keys.filter(k => /-received\.json$/.test(k)));
+    const kAny  = pick(keys.filter(k => /\.json$/.test(k)));
+
+    const key = kPub || kRecv || kAny;
+    if (!key) return res.status(404).json({ ok:false, error:'Sin artefactos JSON' });
+
+    const obj = await s3.send(new GetObjectCommand({ Bucket: DATA_BUCKET, Key: key }));
+    const body = await obj.Body.transformToString();
+    const data = JSON.parse(body);
+
+    // intel para extraer mensaje:
+    // - si vino como { message: {...} } lo usamos
+    // - si es un "received" y tiene Records[0].body, lo parseamos
+    // - si tiene payload "plano", lo devolvemos tal cual
+    let msg = data?.message ?? data;
+    if (!msg && data?.Records?.[0]?.body) {
+      try { msg = JSON.parse(data.Records[0].body); } catch {/* ignore */}
+    }
+
+    if (!msg) return res.status(404).json({ ok:false, error:'No pude inferir payload' });
+
+    return res.json({ ok: true, cid, message: msg, from: key });
+  } catch (e) {
+    return res.status(500).json({ ok:false, error:String(e) });
+  }
 });
 
 // publicar custom desde UI (para panel Mensajería)
