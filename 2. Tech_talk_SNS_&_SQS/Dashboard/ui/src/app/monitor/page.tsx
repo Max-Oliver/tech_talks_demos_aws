@@ -25,6 +25,10 @@ import { ParsedTrace, parsedTraceFromHtml } from '../helpers/TraceHelpers';
 import { jsonToB64 } from '../helpers/JsonConverter';
 import { TopNav } from '@/components/TopNav';
 import { traceJsonToHtml, TraceResponse } from '../helpers/TraceToJsonHtml';
+import { TraceTimeline } from '../helpers/TraceTimline';
+import { DlqMini } from '@/components/DlqMini';
+
+import { ListFilterPlus, ListX } from 'lucide-react';
 
 export const API = process.env.NEXT_PUBLIC_API || 'http://localhost:4000';
 
@@ -43,15 +47,19 @@ type TraceSummary = {
   f_done?: boolean; // 20
   a_recv?: boolean; // 11
   a_done?: boolean; // 21
+  s_recv?: boolean; // 12
+  s_done?: boolean; // 22
   routes?: any;
   ts?: number; // timestamp de última act.
 };
 
-type InventoryItem = {
+type InvItem = {
   productId: string;
-  currentStock: number;
-  reservedUnits: number;
-  updatedAt?: string;
+  name: string;
+  price: number;
+  stock: number;
+  reserved?: number;
+  updatedAt?: number;
 };
 
 type MetricItem = {
@@ -60,13 +68,54 @@ type MetricItem = {
   totalRevenue?: number;
 };
 
+type TabKey = 'overview' | 'orders' | 'messaging' | 'storage' | 'traces';
+
 type ReplenItem = {
+  id?: string;
   productId: string;
-  missingUnits: number;
+  // para faltantes (cuando vendiste más de lo disponible):
+  missingUnits?: number;
+  missingQty?: number; // por compatibilidad
   orderId?: string;
-  key?: string;
+
+  // para reposiciones (inventario_seed/manual)
+  addedUnits?: number;
+  type?: 'manual_restock' | 'new_product' | 'out_of_stock';
+  reason?: string;
+  t?: number;
+  key?: string; // si incluyes el S3 key en el listado
 };
 
+type MetricsResp = {
+  queues: QueueStat[];
+  metricsByTrace: {
+    published: number;
+    routed: number;
+    f_recv: number;
+    f_done: number;
+    a_recv: number;
+    a_done: number;
+  };
+  processed: { fulfillment: number; analytics: number };
+  dlqCounts: { fulfill: number; analytics: number; thr: number };
+  bucket: string;
+};
+
+// ===== styles =====
+// estilos base
+const noSpin =
+  '[appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none';
+const inputBase =
+  'h-10 w-full rounded-xl border border-slate-700 bg-slate-800/80 px-3 text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-sky-600/40';
+const input = `${inputBase}`;
+const inputNum = `${inputBase} ${noSpin}`;
+const inputMoney = `${inputBase} pl-7 ${noSpin}`;
+const label = 'text-slate-300 text-sm mb-1';
+const help = 'text-xs text-slate-500';
+const btnPrimary =
+  'rounded-xl border border-sky-700 bg-sky-600/30 hover:bg-sky-600/40 px-4 h-10 text-sky-200 transition';
+const btnGhost =
+  'rounded-xl border border-transparent hover:bg-slate-800/60 px-4 h-10 text-slate-300 transition';
 // ===== helpers =====
 const field =
   'bg-slate-900/70 text-slate-100 placeholder:text-slate-500 border border-slate-800 rounded-md p-2 focus:outline-none focus:ring-1 focus:ring-slate-600';
@@ -101,8 +150,6 @@ async function copy(txt: string) {
   } catch {}
 }
 
-type TabKey = 'overview' | 'orders' | 'messaging' | 'storage' | 'traces';
-
 // ===== page =====
 export default function MonitoringPage() {
   const router = useRouter();
@@ -111,6 +158,8 @@ export default function MonitoringPage() {
   // global UI state
   const [activeTab, setActiveTab] = React.useState<TabKey>('overview');
   const [loading, setLoading] = React.useState(false);
+  const [qLoading, setQLoading] = React.useState(false);
+  const [qLive, setQLive] = React.useState(false);
 
   // header search (CID)
   const [cidQuery, setCidQuery] = React.useState(sp.get('cid') || '');
@@ -120,6 +169,7 @@ export default function MonitoringPage() {
   const [traces, setTraces] = React.useState<TraceSummary[]>([]);
   const [s3Orders, setS3Orders] = React.useState<string[]>([]);
   const [s3Analytics, setS3Analytics] = React.useState<string[]>([]);
+  const [s3Shipping, setS3Shipping] = React.useState<string[]>([]);
   const [detail, setDetail] = React.useState<string>('');
 
   // “badges” auxiliares
@@ -129,38 +179,66 @@ export default function MonitoringPage() {
   const [submitting, setSubmitting] = React.useState(false);
   const [ordId, setOrdId] = React.useState('');
   const [ordCid, setOrdCid] = React.useState('');
-  const [ordRows, setOrdRows] = React.useState<
-    { productId: string; quantity: string; unitPrice: string }[]
-  >([{ productId: '', quantity: '1', unitPrice: '100' }]);
 
-  const addOrderRow = () =>
-    setOrdRows((rows) => [
-      ...rows,
-      { productId: '', quantity: '1', unitPrice: '100' },
-    ]);
-  const removeOrderRow = (i: number) =>
-    setOrdRows((rows) => rows.filter((_, idx) => idx !== i));
+  // Se usa para el formulario de pedidos
+  const [invDraft, setInvDraft] = React.useState<InvItem[]>([
+    { productId: '001', name: 'StartUp book', price: 13, stock: 10 },
+  ]);
 
-  // ---- Inventario: agregar productos ----
-  const [inv, setInv] = React.useState<InventoryItem[]>([]);
-  const [invRows, setInvRows] = React.useState<
-    { productId: string; currentStock: string }[]
-  >([{ productId: '', currentStock: '10' }]);
-  const addInvRow = () =>
-    setInvRows((rows) => [...rows, { productId: '', currentStock: '10' }]);
-  const removeInvRow = (i: number) =>
-    setInvRows((rows) => rows.filter((_, idx) => idx !== i));
+  // Se usa para persistir el listado de inventario
+  const [invList, setInvList] = React.useState<InvItem[]>([]); // ← persistido
+
   const clearInvRows = () =>
-    setInvRows([{ productId: '', currentStock: '10' }]);
+    setInvDraft([{ productId: '', name: '', price: 0, stock: 10 }]);
 
   const [met, setMet] = React.useState<MetricItem[]>([]);
   const [rep, setRep] = React.useState<ReplenItem[]>([]);
+
+  const [bursting, setBursting] = React.useState(false);
+  const [lastBurst, setLastBurst] = React.useState<number | null>(null);
+  const [qChanged, setQChanged] = React.useState<Record<string, number>>({});
+  const lastQueuesRef = React.useRef<QueueStat[]>([]);
 
   // parsed trace (para PlayButton)
   const parsed: ParsedTrace | null = React.useMemo(
     () => (detail ? parsedTraceFromHtml(detail) : null),
     [detail]
   );
+
+  const refreshQueues = React.useCallback(async () => {
+    setQLoading(true);
+    try {
+      const qs = await fetchSafe<QueueStat[]>(`${API}/queues`);
+      const prev = lastQueuesRef.current;
+      const changed: Record<string, number> = {};
+      const sum = (q: QueueStat) =>
+        (q.ApproximateNumberOfMessages || 0) +
+        (q.ApproximateNumberOfMessagesNotVisible || 0) +
+        (q.ApproximateNumberOfMessagesDelayed || 0);
+
+      qs.forEach((q) => {
+        const p = prev.find((x) => x.name === q.name);
+        if (!p) return;
+        if (sum(p) !== sum(q)) changed[q.name] = Date.now();
+      });
+
+      setQueues(qs);
+      lastQueuesRef.current = qs;
+      setQChanged(changed);
+      window.setTimeout(() => setQChanged({}), 1200); // apaga el brillo
+    } finally {
+      setQLoading(false);
+    }
+  }, []);
+
+  // activa/desactiva polling cada 1.5s
+  React.useEffect(() => {
+    if (!qLive) return;
+    const id = window.setInterval(() => {
+      void refreshQueues();
+    }, 1500);
+    return () => window.clearInterval(id);
+  }, [qLive, refreshQueues]);
 
   // keep CID in URL so it survives tab switches
   const setCidAndURL = (v: string) => {
@@ -194,28 +272,54 @@ export default function MonitoringPage() {
     [API]
   );
 
+  // mostrar traza en panel de detalle (inline)
+  const showTraceInline = React.useCallback(async (cid: string) => {
+    if (!cid) return;
+    setCidAndURL(cid);
+    setCidBadge(cid);
+    try {
+      // si tu server devuelve JSON y lo conviertes a HTML, llama a tu helper; si ya devuelve HTML, usa directo
+      // const dto = await fetchSafe<TraceDto>(`${API}/trace/${encodeURIComponent(cid)}`);
+      // const html = traceJsonToHtml(dto);
+      const html = await fetchSafe<string>(
+        `${API}/trace/${encodeURIComponent(cid)}`
+      ); // ← si ya devuelve HTML
+      setDetail(html || '');
+      // scroll suave al panel
+      requestAnimationFrame(scrollToTrace);
+    } catch {
+      setDetail(
+        `<em style="color:#f88">No pude cargar la traza para ${cid}</em>`
+      );
+      requestAnimationFrame(scrollToTrace);
+    }
+  }, []);
+
   // Global refresh (overview)
   const refresh = React.useCallback(async () => {
     setLoading(true);
     try {
-      const [qs, ord, anl, ts] = await Promise.all([
+      const [qs, ord, anl, shp, ts] = await Promise.all([
         fetchSafe<QueueStat[]>(`${API}/queues`),
         fetchSafe<string[]>(`${API}/files?prefix=orders/`),
         fetchSafe<string[]>(`${API}/files?prefix=analytics/`),
+        fetchSafe<string[]>(`${API}/files?prefix=shipping/`),
         fetchSafe<TraceSummary[]>(`${API}/traces`),
       ]);
       setQueues(qs);
       setS3Orders(ord);
       setS3Analytics(anl);
+      setS3Shipping(shp);
       // Ordena por ts desc si hay; si no, deja última posición como “más nueva”
       setTraces(ts.slice().sort((a, b) => (b.ts ?? 0) - (a.ts ?? 0)));
       // dominio
       const [inv_, met_, rep_] = await Promise.all([
-        fetchSafe<InventoryItem[]>(`${API}/domain/inventory`).catch(() => []),
+        fetchSafe<InvItem[]>(`${API}/domain/inventory`).catch(() => []),
         fetchSafe<MetricItem[]>(`${API}/domain/metrics`).catch(() => []),
         fetchSafe<ReplenItem[]>(`${API}/domain/replenishments`).catch(() => []),
       ]);
-      setInv(inv_);
+
+      setInvList(inv_.map(normalizeInvItem));
       setMet(met_);
       setRep(rep_);
     } finally {
@@ -232,56 +336,39 @@ export default function MonitoringPage() {
 
   // ===== acciones de dominio =====
   async function seedInventory() {
-    const rows = invRows
-      .map((r) => ({
-        productId: r.productId.trim(),
-        currentStock: Number(r.currentStock || 0),
-      }))
-      .filter((x) => x.productId);
-    if (!rows.length) return;
-    await fetchSafe(`${API}/domain/inventory/seed`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ items: rows }),
-    });
-    clearInvRows();
-    await refresh();
-  }
-
-  async function sendOrder() {
-    setSubmitting(true);
     try {
-      const payload = {
-        eventType: 'OrderPlaced',
-        priority: 'high' as const,
-        orderId: ordId || crypto.randomUUID(),
-        correlationId: ordCid || crypto.randomUUID(),
-        items: ordRows
-          .map((r) => ({
-            productId: r.productId.trim(),
-            quantity: Number(r.quantity || 0),
-            unitPrice: Number(r.unitPrice || 0),
-          }))
-          .filter((x) => x.productId && x.quantity > 0),
-      };
-      const res = await fetch(`${API}/domain/order`, {
+      setSavingInv(true);
+
+      // 👇 formateamos bien (nombre, id, precio, stock)
+      const items = invDraft
+        .map((r) => ({
+          productId: String(r.productId || '').trim(),
+          name: String(r.name || '').trim(),
+          price: Number(r.price ?? 0),
+          stock: Number.isFinite(Number(r.stock)) ? Number(r.stock) : 0,
+          reserved: Number(r.reserved ?? 0),
+          updatedAt: Date.now(),
+        }))
+        .filter((x) => x.productId && x.name);
+
+      if (!items.length) return;
+
+      await fetchSafe(`${API}/domain/inventory/seed`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ items }), // ← payload nuevo
       });
-      if (!res.ok) {
-        const txt = await res.text().catch(() => '');
-        throw new Error(`POST /domain/order => ${res.status} ${txt}`);
-      }
-      // badge con CID
-      setCidBadge(payload.correlationId);
-      // refresca datasets
-      await refresh();
-      // y ofrece “reproducir en vivo” directo
-      const b64 = encodeURIComponent(jsonToB64(payload));
-      router.push(`/visualizer?mode=auto&payload=${b64}`);
+
+      await loadInventory(); // refresca tabla/selector
+      await reloadReplenishments(); // ⬅️ refresca el panel de “Métricas & Reposición”
+      setInvDraft([{ productId: '', name: '', price: 0, stock: 10 }]); // resetear draft
+
+      setSaveMsg('Guardado ✓');
+      // opcional: dejar 1 fila vacía para seguir cargando
+      // setInvDraft([{ productId: '', name: '', price: 0, stock: 10 }]);
+      setTimeout(() => setSaveMsg(null), 1500);
     } finally {
-      setSubmitting(false);
+      setSavingInv(false);
     }
   }
 
@@ -297,6 +384,234 @@ export default function MonitoringPage() {
     await showTrace(cidQuery);
   }
 
+  const traceRef = React.useRef<HTMLDivElement>(null);
+  const scrollToTrace = () =>
+    traceRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+  const detailHtml =
+    typeof detail === 'string' ? detail : traceJsonToHtml(detail as any);
+
+  // KPIS
+  type QueueStat = {
+    name: string;
+    ApproximateNumberOfMessages?: number;
+    ApproximateNumberOfMessagesNotVisible?: number;
+    ApproximateNumberOfMessagesDelayed?: number;
+  };
+
+  const [metrics, setMetrics] = React.useState<{
+    totalRevenue: number;
+    products: number;
+  } | null>(null);
+  const [todayOrders, setTodayOrders] = React.useState<number>(0);
+
+  async function loadSummary() {
+    const [qs, ms, ts] = await Promise.all([
+      fetchSafe<QueueStat[]>(`${API}/queues`),
+      fetchSafe<any[]>(`${API}/domain/metrics`).catch(() => []),
+      fetchSafe<any[]>(`${API}/traces`).catch(() => []),
+    ]);
+    setQueues(qs);
+    const totalRev = ms.reduce((a, m) => a + Number(m.totalRevenue || 0), 0);
+    setMetrics({ totalRevenue: totalRev, products: ms.length });
+
+    const today0 = new Date();
+    today0.setHours(0, 0, 0, 0);
+    const todayIds = ts.filter((t) => t.published).map((t) => t.id);
+    // heurística: contamos published.json de hoy
+    let count = 0;
+    for (const id of todayIds) {
+      const p = await fetchSafe<any>(`${API}/trace/${id}`);
+      const step0 = p.steps?.find((s: any) =>
+        s.key.endsWith('/00-published.json')
+      );
+      if (step0?.data?.t && step0.data.t >= today0.getTime()) count++;
+    }
+    setTodayOrders(count);
+  }
+  React.useEffect(() => {
+    void loadSummary();
+  }, []);
+
+  // Metricas de Queue
+  const readyTotal = queues
+    .filter((q) => !q.name.endsWith('-dlq'))
+    .reduce((a, q) => a + Number(q.ApproximateNumberOfMessages ?? 0), 0);
+
+  const dlqTotal = queues
+    .filter((q) => q.name.endsWith('-dlq'))
+    .reduce((a, q) => a + Number(q.ApproximateNumberOfMessages ?? 0), 0);
+
+  const totalMsgs = readyTotal + dlqTotal;
+  const errPct = totalMsgs ? Math.round((dlqTotal / totalMsgs) * 100) : 0;
+
+  const inflightTotal = queues.reduce(
+    (a, q) => a + Number(q.ApproximateNumberOfMessagesNotVisible ?? 0),
+    0
+  );
+  const delayedTotal = queues.reduce(
+    (a, q) => a + Number(q.ApproximateNumberOfMessagesDelayed ?? 0),
+    0
+  );
+
+  const [orderNo, setOrderNo] = React.useState<string>('');
+  const [corrNo, setCorrNo] = React.useState<string>('');
+  const [sel, setSel] = React.useState<string>(''); // productId
+  const [qty, setQty] = React.useState<number>(1);
+
+  React.useEffect(() => {
+    // IDs por defecto
+    const rand = short(); // definí abajo
+    setOrderNo(`001-${rand}`);
+    setCorrNo(`001-${short()}`);
+  }, []);
+  function short() {
+    return Math.random().toString(36).slice(2, 8);
+  }
+  const prod = invList.find((p) => p.productId === sel);
+  const unit = Number(prod?.price ?? 0);
+  const total = unit * qty;
+
+  async function placeOrder() {
+    if (!sel) return alert('Elegí un producto');
+    const body = {
+      orderId: orderNo || undefined,
+      correlationId: corrNo || undefined,
+      items: [{ productId: sel, quantity: qty }],
+    };
+    const response = await fetchSafe<any>(`${API}/domain/order`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+    if (response.shortage > 0) {
+      alert(
+        `Se vendieron ${response.purchaseQty}, faltaron ${response.shortage}. Se creó reposición #${response.createdReplenishment?.id}.`
+      );
+    } else {
+      alert(
+        `Orden creada exitosamente! ✅ 
+         Total $${response.total?.toFixed(2)} (${
+          response.purchaseQty
+        } x $${response.unitPrice.toFixed(2)})`
+      );
+    }
+    // refrescar métricas y colas
+    void loadSummary();
+    await loadInventory();
+    await reloadReplenishments();
+    await loadMetricsAll();
+    await refresh();
+  }
+
+  const reloadReplenishments = React.useCallback(async () => {
+    const rep_ = await fetchSafe<ReplenItem[]>(
+      `${API}/domain/replenishments`
+    ).catch(() => []);
+    setRep(rep_);
+  }, []);
+
+  // ==== Helpers para el CRUD en la grilla de "Añadir productos"
+  const edit = React.useCallback((idx: number, patch: Partial<InvItem>) => {
+    setInvDraft((prev) =>
+      prev.map((row, i) => (i === idx ? { ...row, ...patch } : row))
+    );
+  }, []);
+
+  const addRow = React.useCallback(() => {
+    setInvDraft((prev) => [
+      ...prev,
+      { productId: '', name: '', price: 0, stock: 1 },
+    ]);
+  }, []);
+
+  const removeRow = React.useCallback((idx: number) => {
+    setInvDraft((prev) => prev.filter((_, i) => i !== idx));
+  }, []);
+
+  const isRowValid = (r: InvItem) =>
+    r.name?.trim() &&
+    r.productId?.trim() &&
+    Number(r.price) >= 0 &&
+    Number.isInteger(Number(r.stock)) &&
+    Number(r.stock) >= 0;
+
+  const timeAgo = (ms?: number) => {
+    if (!ms) return '—';
+    const s = Math.floor((Date.now() - ms) / 1000);
+    if (s < 60) return `${s}s`;
+    const m = Math.floor(s / 60);
+    if (m < 60) return `${m}m`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return `${h}h`;
+    const d = Math.floor(h / 24);
+    return `${d}d`;
+  };
+
+  // helpers UI
+  const cx = (...xs: (string | false | null | undefined)[]) =>
+    xs.filter(Boolean).join(' ');
+  const money = (v: any) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? `$${n.toFixed(2)}` : '—';
+  };
+
+  function normalizeInvItem(x: any): InvItem {
+    return {
+      productId: String(x.productId ?? x.product ?? ''),
+      name: x.name ?? x.productId ?? 'Unnamed',
+      price: x.price != null ? Number(x.price) : 0,
+      stock: x.stock != null ? Number(x.stock) : Number(x.quantity ?? 0) || 0,
+      reserved: Number(x.reserved ?? 0),
+      updatedAt: x.updatedAt ? Number(x.updatedAt) : undefined,
+    };
+  }
+
+  const [savingInv, setSavingInv] = React.useState(false);
+  const [saveMsg, setSaveMsg] = React.useState<string | null>(null);
+
+  const loadInventory = React.useCallback(async () => {
+    const raw = await fetchSafe<any[]>(`${API}/domain/inventory`);
+    setInvList(raw.map(normalizeInvItem));
+  }, []);
+
+  React.useEffect(() => {
+    void loadInventory();
+  }, [loadInventory]);
+
+  // KPIS
+  const [mx, setMx] = React.useState<MetricsResp | null>(null);
+  const [cwSel, setCwSel] = React.useState<string>('demo-thr');
+  const [cwRows, setCwRows] = React.useState<any[] | null>(null);
+
+  const loadMetricsAll = React.useCallback(async () => {
+    try {
+      const m = await fetchSafe<MetricsResp>(`${API}/metrics`);
+      setMx(m);
+    } catch (e) {
+      // si no existe /metrics todavía, evitamos romper el render
+      console.warn('KPIs: /metrics no disponible:', e);
+      setMx(null);
+    }
+  }, []);
+
+  const loadCw = React.useCallback(async (q: string) => {
+    try {
+      const r = await fetchSafe<any[]>(
+        `${API}/cw/sqs/${encodeURIComponent(q)}/summary`
+      );
+      setCwRows(r);
+      await loadMetricsAll(); // recarga KPIs
+    } catch {
+      setCwRows(null); // en LocalStack puede no estar
+    }
+  }, []);
+
+  React.useEffect(() => {
+    void loadMetricsAll();
+  }, [loadMetricsAll]);
+
   return (
     <div className="min-h-screen bg-[linear-gradient(180deg,#0b1220,rgba(11,18,32,0.92))] text-slate-100 px-4 md:px-6 pb-8">
       <TopNav title={<>Fanout &amp; SQS — Monitor</>} />
@@ -307,14 +622,21 @@ export default function MonitoringPage() {
         value={activeTab}
         onValueChange={(v) => {
           setActiveTab(v as TabKey);
-          if (v === 'overview') void refresh();
+          if (v === 'overview') {
+            void refresh();
+            void loadMetricsAll();
+          }
+          if (v === 'orders') {
+            void loadMetricsAll();
+          }
         }}
       >
         <div className="flex items-center justify-between mb-4 mt-10">
           <TabsList className="bg-slate-900/60 border border-slate-800">
             <TabsTrigger value="overview">Resumen</TabsTrigger>
             <TabsTrigger value="orders">Pedidos</TabsTrigger>
-            <TabsTrigger value="messaging">Mensajería</TabsTrigger>
+            <TabsTrigger value="kpis">Monitoring</TabsTrigger>
+            <TabsTrigger value="messaging">DLQ Service</TabsTrigger>
             <TabsTrigger value="storage">Almacenamiento</TabsTrigger>
             <TabsTrigger value="traces">Trazas</TabsTrigger>
           </TabsList>
@@ -329,7 +651,7 @@ export default function MonitoringPage() {
                 onChange={(e) => setCidAndURL(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && goToTrace()}
               />
-              <Button variant="secondary" onClick={() => goToTrace()}>
+              <Button className={btnPrimary} onClick={() => goToTrace()}>
                 Ver
               </Button>
             </div>
@@ -339,288 +661,385 @@ export default function MonitoringPage() {
         {/* ===== RESUMEN ===== */}
         <TabsContent value="overview" className="space-y-4">
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-            {[
-              ['Pedidos hoy', '—'],
-              ['Eventos proc.', '—'],
-              ['% errores', '—'],
-              ['Ingresos', '—'],
-            ].map(([k, v], i) => (
-              <Card key={i} className="border-slate-800 bg-slate-900/50">
-                <CardContent className="p-4">
-                  <div className="text-slate-400 text-xs">{k}</div>
-                  <div className="text-2xl font-semibold">{v}</div>
-                </CardContent>
-              </Card>
-            ))}
+            {(() => {
+              const received =
+                (mx?.metricsByTrace?.f_recv ?? 0) +
+                (mx?.metricsByTrace?.a_recv ?? 0);
+              const processedOk =
+                (mx?.metricsByTrace?.f_done ?? 0) +
+                (mx?.metricsByTrace?.a_done ?? 0);
+              const dlq =
+                (mx?.dlqCounts?.fulfill ?? 0) +
+                (mx?.dlqCounts?.analytics ?? 0) +
+                (mx?.dlqCounts?.thr ?? 0);
+              const base = processedOk + dlq;
+              const errPct = base ? Math.round((dlq / base) * 100) : 0;
+
+              const cards: [string, string | number][] = [
+                ['Eventos recibidos', received],
+                ['Procesados OK', processedOk],
+                ['En DLQ (pend.)', dlq],
+                ['% error (estim.)', `${errPct}%`],
+              ];
+
+              return (
+                <>
+                  {cards.map(([k, v], i) => (
+                    <Card key={i} className="border-slate-800 bg-slate-800/50">
+                      <CardContent className="p-4">
+                        <div className="text-slate-400 text-xs">{k}</div>
+                        <div className="text-2xl font-semibold">{v as any}</div>
+                      </CardContent>
+                    </Card>
+                  ))}
+                </>
+              );
+            })()}
           </div>
 
-          <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-            {/* Salud de colas */}
-            <Card className="border-slate-800 bg-slate-900/50">
-              <CardHeader className="pb-2">
-                <CardTitle className="text-slate-200">
-                  Eventos en tránsito
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="max-h-[40vh] overflow-auto">
-                <table className="w-full text-sm">
-                  <thead className="sticky top-0 bg-slate-900/60 text-sky-300">
-                    <tr>
-                      <th className="text-left p-2">Queue</th>
-                      <th className="text-center p-2">Ready</th>
-                      <th className="text-center p-2">In-Flight</th>
-                      <th className="text-center p-2">Delayed</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {queues.map((q) => (
-                      <tr key={q.name} className="border-t border-slate-800">
-                        <td className="p-2">
-                          <code className="break-all">{q.name}</code>
-                        </td>
-                        <td className="text-center p-2">
-                          {q.ApproximateNumberOfMessages || 0}
-                        </td>
-                        <td className="text-center p-2">
-                          {q.ApproximateNumberOfMessagesNotVisible || 0}
-                        </td>
-                        <td className="text-center p-2">
-                          {q.ApproximateNumberOfMessagesDelayed || 0}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </CardContent>
-            </Card>
-
+          <div className="grid grid-cols-1 gap-4">
             {/* Últimas trazas */}
-            <Card className="border-slate-800 bg-slate-900/50">
+            <Card className="min-w-0 border-slate-800 bg-slate-900/50">
               <CardHeader className="pb-2">
                 <CardTitle className="text-slate-200">Últimas trazas</CardTitle>
               </CardHeader>
-              <CardContent className="max-h-[40vh] overflow-auto">
-                <table className="w-full text-sm">
-                  <thead className="sticky top-0 bg-slate-900/60 text-sky-300">
-                    <tr>
-                      <th className="text-left p-2">CorrelationId</th>
-                      <th className="text-center p-2">Published</th>
-                      <th className="text-center p-2">Route→F</th>
-                      <th className="text-center p-2">Route→A</th>
-                      <th className="text-center p-2">Recv F</th>
-                      <th className="text-center p-2">Done F</th>
-                      <th className="text-center p-2">Recv A</th>
-                      <th className="text-center p-2">Done A</th>
-                      <th />
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {traces.slice(0, 25).map((t) => {
-                      const routeF = t.routes ? true : t.f_recv || t.f_done;
-                      const routeA = t.routes ? true : t.a_recv || t.a_done;
-                      return (
-                        <tr key={t.id} className="border-t border-slate-800">
-                          <td className="p-2">
-                            <code className="break-all">{t.id}</code>
-                          </td>
-                          <td className="text-center">{dot(t.published)}</td>
-                          <td className="text-center">{dot(!!routeF)}</td>
-                          <td className="text-center">{dot(!!routeA)}</td>
-                          <td className="text-center">{dot(t.f_recv)}</td>
-                          <td className="text-center">{dot(t.f_done)}</td>
-                          <td className="text-center">{dot(t.a_recv)}</td>
-                          <td className="text-center">{dot(t.a_done)}</td>
-                          <td className="text-center">
-                            <div className="flex gap-2 justify-end">
-                              <Button
-                                variant="secondary"
-                                className="h-8 px-3"
-                                onClick={() => showTrace(t.id)}
-                              >
-                                Ver
-                              </Button>
-                              <Button
-                                className="h-8 px-3"
-                                onClick={() => replayByCid(t.id)}
-                              >
-                                Reproducir
-                              </Button>
-                            </div>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+
+              {/* 👇 contenedor con scroll horizontal + vertical */}
+              <CardContent className="max-h-[40vh] overflow-hidden">
+                <div className="overflow-x-auto overflow-y-auto max-h-[40vh]">
+                  <table className="table-fixed min-w-[1200px] w-full text-sm">
+                    <colgroup>
+                      <col className="w-[36ch]" /> {/* CID */}
+                      <col className="w-[8ch]" /> {/* Published */}
+                      <col className="w-[10ch]" /> {/* R→Ful */}
+                      <col className="w-[10ch]" /> {/* R→Met */}
+                      <col className="w-[12ch]" /> {/* R→Ship */}
+                      <col className="w-[10ch]" /> {/* Recv Ship */}
+                      <col className="w-[10ch]" /> {/* Done Ship */}
+                      <col className="w-[10ch]" /> {/* Recv Ful */}
+                      <col className="w-[10ch]" /> {/* Done Ful */}
+                      <col className="w-[10ch]" /> {/* Recv Met */}
+                      <col className="w-[10ch]" /> {/* Done Met */}
+                      <col className="w-[16ch]" /> {/* acciones */}
+                    </colgroup>
+
+                    <thead className="sticky top-0 bg-slate-900/60 text-sky-300">
+                      <tr>
+                        <th className="text-left p-2">CorrelationId</th>
+                        <th className="text-center p-2 whitespace-nowrap">
+                          Published
+                        </th>
+                        <th className="text-center p-2 whitespace-nowrap">
+                          Route→Ful
+                        </th>
+                        <th className="text-center p-2 whitespace-nowrap">
+                          Route→Met
+                        </th>
+                        <th className="text-center p-2 whitespace-nowrap">
+                          Route→Ship
+                        </th>
+                        <th className="text-center p-2 whitespace-nowrap">
+                          Recv Ship
+                        </th>
+                        <th className="text-center p-2 whitespace-nowrap">
+                          Done Ship
+                        </th>
+                        <th className="text-center p-2 whitespace-nowrap">
+                          Recv Ful
+                        </th>
+                        <th className="text-center p-2 whitespace-nowrap">
+                          Done Ful
+                        </th>
+                        <th className="text-center p-2 whitespace-nowrap">
+                          Recv Met
+                        </th>
+                        <th className="text-center p-2 whitespace-nowrap">
+                          Done Met
+                        </th>
+                        <th />
+                      </tr>
+                    </thead>
+
+                    <tbody>
+                      {traces.slice(0, 25).map((t) => {
+                        const routeF = t.routes ? true : t.f_recv || t.f_done;
+                        const routeA = t.routes ? true : t.a_recv || t.a_done;
+                        const routeS = t.routes ? true : t.s_recv || t.s_done;
+
+                        return (
+                          <tr key={t.id} className="border-t border-slate-800">
+                            {/* 👇 primera columna sticky para que el CID siempre se vea al scrollear horizontalmente */}
+                            <td className="p-2 left-0 bg-slate-900/80 backdrop-blur supports-[backdrop-filter]:bg-slate-900/60">
+                              <code className="break-all">{t.id}</code>
+                            </td>
+
+                            <td className="text-center">{dot(t.published)}</td>
+                            <td className="text-center">{dot(!!routeF)}</td>
+                            <td className="text-center">{dot(!!routeA)}</td>
+                            <td className="text-center">{dot(!!routeS)}</td>
+                            <td className="text-center">{dot(t.s_recv)}</td>
+                            <td className="text-center">{dot(t.s_done)}</td>
+                            <td className="text-center">{dot(t.f_recv)}</td>
+                            <td className="text-center">{dot(t.f_done)}</td>
+                            <td className="text-center">{dot(t.a_recv)}</td>
+                            <td className="text-center">{dot(t.a_done)}</td>
+                            <td className="text-center">
+                              <div className="flex gap-2 justify-end">
+                                <Button
+                                  className={btnGhost}
+                                  onClick={() => showTraceInline(t.id)}
+                                >
+                                  Ver
+                                </Button>
+                                <Button
+                                  className={btnPrimary}
+                                  onClick={() => replayByCid(t.id)}
+                                >
+                                  Reproducir
+                                </Button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
               </CardContent>
             </Card>
-          </div>
 
-          {/* Detalle debajo (como en el HTML original) */}
-          <Card className="mt-4 border-slate-800 bg-slate-900/50">
-            <CardHeader className="pb-2 flex items-center justify-between">
-              <CardTitle className="text-slate-200">Detalle de traza</CardTitle>
-              <div className="flex items-center gap-2">
-                <PlayButton parsed={parsed} />
-                <Button variant="secondary" onClick={() => setDetail('')}>
-                  Limpiar
-                </Button>
-              </div>
-            </CardHeader>
-            <CardContent className="max-h-[70vh] overflow-auto">
-              {detail ? (
-                <TraceAccordion
-                  detailHtml={detail}
-                  cidToHighlight={cidQuery || cidBadge}
-                />
-              ) : (
-                <em className="text-slate-400">Selecciona “Ver”.</em>
-              )}
-            </CardContent>
-          </Card>
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+              {/* Salud de colas */}
+              <Card className="min-w-0 border-slate-800 bg-slate-900/50">
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-slate-200">
+                    Eventos en tránsito
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="max-h-[40vh] overflow-y-auto">
+                  {/* tabla simple; si quieres, también puedes fijar colgroup aquí */}
+                  <table className="w-full table-fixed text-sm">
+                    <colgroup>
+                      <col className="w-[50%]" />
+                      <col className="w-[16%]" />
+                      <col className="w-[17%]" />
+                      <col className="w-[17%]" />
+                    </colgroup>
+                    <thead className="sticky top-0 bg-slate-900/60 text-sky-300">
+                      <tr>
+                        <th className="text-left p-2">Queue</th>
+                        <th className="text-center p-2 whitespace-nowrap">
+                          Ready
+                        </th>
+                        <th className="text-center p-2 whitespace-nowrap">
+                          In-Flight
+                        </th>
+                        <th className="text-center p-2 whitespace-nowrap">
+                          Delayed
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {queues.map((q) => {
+                        const isFocus = /^(demo-thr|demo-thr-dlq)$/i.test(
+                          q.name
+                        );
+                        const changed = !!qChanged[q.name];
+                        return (
+                          <tr
+                            key={q.name}
+                            className={cx(
+                              'border-t border-slate-800 transition',
+                              isFocus && 'bg-sky-950/20',
+                              changed && 'animate-pulse ring-1 ring-sky-500/40'
+                            )}
+                          >
+                            <td className="p-2">
+                              <code className="break-all">{q.name}</code>
+                            </td>
+                            <td className="text-center p-2">
+                              {q.ApproximateNumberOfMessages || 0}
+                            </td>
+                            <td className="text-center p-2">
+                              {q.ApproximateNumberOfMessagesNotVisible || 0}
+                            </td>
+                            <td className="text-center p-2">
+                              {q.ApproximateNumberOfMessagesDelayed || 0}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </CardContent>
+              </Card>
+
+              {/* Detalle debajo (como en el HTML original) */}
+              <Card
+                id="trace-detail"
+                ref={traceRef}
+                className=" border-slate-800 bg-slate-900/50"
+              >
+                <CardHeader className="pb-2 flex items-center justify-between">
+                  <CardTitle className="text-slate-200">
+                    Detalle de traza
+                  </CardTitle>
+                  <div className="flex items-center gap-2">
+                    <PlayButton parsed={parsed} />
+                    <Button variant="secondary" onClick={() => setDetail('')}>
+                      Limpiar
+                    </Button>
+                  </div>
+                </CardHeader>
+                <CardContent className="max-h-[70vh] overflow-auto">
+                  {detail ? (
+                    <>
+                      <TraceTimeline detailHtml={detailHtml} />
+                      <TraceAccordion
+                        detailHtml={detail}
+                        cidToHighlight={cidQuery || cidBadge}
+                      />
+                    </>
+                  ) : (
+                    <em className="text-slate-400">Selecciona “Ver”.</em>
+                  )}
+                </CardContent>
+              </Card>
+            </div>
+          </div>
         </TabsContent>
 
         {/* ===== PEDIDOS ===== */}
         <TabsContent value="orders" className="space-y-4">
-          <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+          <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
+            {(() => {
+              const ordersOk = mx ? mx.processed.fulfillment ?? 0 : 0; // archivos en S3/orders/
+              const fulfillRecv = mx?.metricsByTrace?.f_recv ?? 0;
+              const fulfillDone = mx?.metricsByTrace?.f_done ?? 0;
+              const revenue = met.reduce(
+                (a, m) => a + Number(m.totalRevenue || 0),
+                0
+              );
+              const productsWithSales = met.length;
+
+              const cards: [string, string | number][] = [
+                ['Ordenes de compra recibidas', fulfillRecv],
+                ['Órdenes procesadas OK', ordersOk],
+                ['Pedidos Despachados', fulfillDone],
+                ['Ingresos totales', `$${revenue.toFixed(2)}`],
+                ['Productos con ventas', productsWithSales],
+              ];
+
+              return (
+                <>
+                  {cards.map(([k, v], i) => (
+                    <Card key={i} className="border-slate-800 bg-slate-900/50">
+                      <CardContent className="p-4">
+                        <div className="text-slate-400 text-xs">{k}</div>
+                        <div className="text-2xl font-semibold">{v as any}</div>
+                      </CardContent>
+                    </Card>
+                  ))}
+                </>
+              );
+            })()}
+          </div>
+          <div className="grid grid-cols-2 xl:grid-cols-2 gap-4">
             {/* Crear pedido */}
             <Card className="border-slate-800 bg-slate-900/50">
               <CardHeader className="pb-2">
                 <CardTitle className="text-slate-200">Crear pedido</CardTitle>
               </CardHeader>
               <CardContent className="space-y-4">
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                  <div>
-                    <div className="text-[11px] text-slate-400 mb-1">
-                      OrderId
-                    </div>
-                    <input
-                      className={`${field} w-full`}
-                      value={ordId}
-                      onChange={(e) => setOrdId(e.target.value)}
-                    />
-                  </div>
-                  <div>
-                    <div className="text-[11px] text-slate-400 mb-1">
-                      CorrelationId
-                    </div>
-                    <input
-                      className={`${field} w-full`}
-                      placeholder="auto si lo dejas vacío"
-                      value={ordCid}
-                      onChange={(e) => setOrdCid(e.target.value)}
-                    />
-                  </div>
-                </div>
                 <div>
-                  <div className="text-slate-300 mb-2">Ítems de la orden</div>
-                  <ul className="space-y-3">
-                    {ordRows.map((r, i) => (
-                      <li
-                        key={i}
-                        className="grid grid-cols-1 md:grid-cols-[1fr_120px_140px_44px] gap-2 items-end"
-                      >
-                        <div>
-                          <div className="text-[11px] text-slate-400 mb-1">
-                            Producto (productId)
-                          </div>
-                          <input
-                            className={`${field} w-full`}
-                            value={r.productId}
-                            onChange={(e) =>
-                              setOrdRows((rows) =>
-                                rows.map((x, idx) =>
-                                  idx === i
-                                    ? { ...x, productId: e.target.value }
-                                    : x
-                                )
-                              )
-                            }
-                          />
-                        </div>
-                        <div>
-                          <div className="text-[11px] text-slate-400 mb-1">
-                            Cantidad
-                          </div>
-                          <input
-                            className={`${field} w-full`}
-                            type="number"
-                            min={1}
-                            value={r.quantity}
-                            onChange={(e) =>
-                              setOrdRows((rows) =>
-                                rows.map((x, idx) =>
-                                  idx === i
-                                    ? { ...x, quantity: e.target.value }
-                                    : x
-                                )
-                              )
-                            }
-                          />
-                        </div>
-                        <div>
-                          <div className="text-[11px] text-slate-400 mb-1">
-                            Precio unitario
-                          </div>
-                          <input
-                            className={`${field} w-full`}
-                            type="number"
-                            min={0}
-                            step="0.01"
-                            value={r.unitPrice}
-                            onChange={(e) =>
-                              setOrdRows((rows) =>
-                                rows.map((x, idx) =>
-                                  idx === i
-                                    ? { ...x, unitPrice: e.target.value }
-                                    : x
-                                )
-                              )
-                            }
-                          />
-                        </div>
-                        <div className="flex md:justify-end">
-                          <Button
-                            variant="outline"
-                            className="w-full md:w-11"
-                            onClick={() => removeOrderRow(i)}
-                          >
-                            🗑
-                          </Button>
-                        </div>
-                      </li>
+                  <label className="text-slate-300">Producto</label>
+                  <select
+                    className={input}
+                    value={sel}
+                    onChange={(e) => setSel(e.target.value)}
+                  >
+                    <option value="">— Elegir —</option>
+                    {invList.map((p) => (
+                      <option key={p.productId} value={p.productId}>
+                        {p.name ?? p.productId} — {money(p.price)} (stock{' '}
+                        {p.stock ?? 0})
+                      </option>
                     ))}
-                  </ul>
+                  </select>
+
+                  <div className="grid grid-cols-3 gap-3">
+                    <div>
+                      <label className="text-slate-300">Cantidad</label>
+                      <input
+                        type="number"
+                        className={input}
+                        value={qty}
+                        min={1}
+                        onChange={(e) =>
+                          setQty(Math.max(1, Number(e.target.value || 1)))
+                        }
+                      />
+                    </div>
+                    <div>
+                      <label className="text-slate-300">Precio unitario</label>
+                      <div className="h-10 flex items-center px-3 rounded border border-slate-700 bg-slate-800">
+                        {unit ? `$${unit.toFixed(2)}` : '—'}
+                      </div>
+                    </div>
+                    <div>
+                      <label className="text-slate-300">Total</label>
+                      <div className="h-10 flex items-center px-3 rounded border border-slate-700 bg-slate-800 font-semibold">
+                        {unit ? `$${total.toFixed(2)}` : '—'}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3 mt-4">
+                    <div>
+                      <label className="text-slate-300">OrderId</label>
+                      <input
+                        className={input}
+                        value={orderNo}
+                        onChange={(e) => setOrderNo(e.target.value)}
+                        placeholder="001-uuid"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-slate-300">CorrelationId</label>
+                      <input
+                        className={input}
+                        value={corrNo}
+                        onChange={(e) => setCorrNo(e.target.value)}
+                        placeholder="001-uuid"
+                      />
+                    </div>
+                  </div>
 
                   <div className="mt-3 flex items-center justify-between">
-                    <Button variant="secondary" onClick={addOrderRow}>
-                      + Ítem
+                    {cidBadge && (
+                      <div className="text-xs border border-slate-700 rounded-full px-3 py-1 bg-slate-900 flex items-center gap-2">
+                        CID: <code>{cidBadge}</code>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className={btnGhost}
+                          onClick={() => copy(cidBadge)}
+                        >
+                          copiar
+                        </Button>
+                      </div>
+                    )}
+                    <Button
+                      type="button"
+                      className={btnPrimary}
+                      onClick={() => void placeOrder()}
+                      disabled={submitting || !sel}
+                    >
+                      {submitting ? 'Creando…' : 'Crear pedido'}
                     </Button>
-                    <div className="flex items-center gap-3">
-                      {cidBadge && (
-                        <div className="text-xs border border-slate-700 rounded-full px-3 py-1 bg-slate-900 flex items-center gap-2">
-                          CID: <code>{cidBadge}</code>
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            className="h-6 px-2"
-                            onClick={() => copy(cidBadge)}
-                          >
-                            copiar
-                          </Button>
-                        </div>
-                      )}
-                      <Button
-                        type="button"
-                        onClick={(e) => {
-                          e.preventDefault();
-                          void sendOrder();
-                        }}
-                        disabled={submitting}
-                      >
-                        {submitting ? 'Enviando…' : 'Enviar'}
-                      </Button>
-                    </div>
+                    <Button className={btnGhost} onClick={clearInvRows}>
+                      🗑️ Limpiar
+                    </Button>
                   </div>
                 </div>
               </CardContent>
@@ -634,73 +1053,114 @@ export default function MonitoringPage() {
                 </CardTitle>
               </CardHeader>
               <CardContent className="space-y-3">
-                <ul className="space-y-3">
-                  {invRows.map((r, i) => (
-                    <li
+                <div className="space-y-4">
+                  {invDraft.map((row, i) => (
+                    <div
                       key={i}
-                      className="grid grid-cols-1 md:grid-cols-[1fr_160px_44px] gap-2 items-end"
+                      className="grid grid-cols-1 md:grid-cols-4 gap-3"
                     >
                       <div>
-                        <div className="text-[11px] text-slate-400 mb-1">
-                          Producto (productId)
-                        </div>
+                        <div className={label}>Nombre</div>
                         <input
-                          className={`${field} w-full`}
-                          placeholder="p.ej. StartUp book"
-                          value={r.productId}
-                          onChange={(e) =>
-                            setInvRows((rows) =>
-                              rows.map((x, idx) =>
-                                idx === i
-                                  ? { ...x, productId: e.target.value }
-                                  : x
-                              )
-                            )
-                          }
+                          className={input}
+                          placeholder="StartUp book"
+                          value={row.name}
+                          onChange={(e) => edit(i, { name: e.target.value })}
                         />
+                        <div className={help}>Nombre del producto</div>
                       </div>
+
                       <div>
-                        <div className="text-[11px] text-slate-400 mb-1">
-                          Stock actual
-                        </div>
+                        <div className={label}>ID (productId)</div>
                         <input
-                          className={`${field} w-full`}
-                          type="number"
-                          min={0}
-                          value={r.currentStock}
+                          className={input}
+                          placeholder="Product ID único"
+                          value={row.productId}
                           onChange={(e) =>
-                            setInvRows((rows) =>
-                              rows.map((x, idx) =>
-                                idx === i
-                                  ? { ...x, currentStock: e.target.value }
-                                  : x
-                              )
-                            )
+                            edit(i, { productId: e.target.value })
+                          }
+                          autoCapitalize="off"
+                          spellCheck={false}
+                        />
+                        <div className={help}>
+                          Clave única (se usa en órdenes y métricas).
+                        </div>
+                      </div>
+
+                      <div>
+                        <div className={label}>Precio</div>
+                        <div className="relative">
+                          <span className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-400">
+                            $
+                          </span>
+                          <input
+                            className={inputMoney}
+                            type="number"
+                            inputMode="decimal"
+                            step="0.01"
+                            min="0"
+                            placeholder="0.00"
+                            value={row.price}
+                            onChange={(e) =>
+                              edit(i, { price: Number(e.target.value) })
+                            }
+                          />
+                        </div>
+                        <div className={help}>
+                          Precio unitario (decimales permitidos).
+                        </div>
+                      </div>
+
+                      <div>
+                        <div className={label}>Stock</div>
+                        <input
+                          className={inputNum}
+                          type="number"
+                          inputMode="numeric"
+                          step="1"
+                          min="0"
+                          placeholder="10"
+                          value={row.stock}
+                          onChange={(e) =>
+                            edit(i, {
+                              stock: Math.max(
+                                0,
+                                Math.trunc(Number(e.target.value) || 0)
+                              ),
+                            })
                           }
                         />
+                        <div className={help}>
+                          Unidades disponibles (entero).
+                        </div>
                       </div>
-                      <div className="flex md:justify-end">
+
+                      <div className="md:col-span-4 flex justify-end">
                         <Button
-                          variant="outline"
-                          className="w-full md:w-11"
-                          onClick={() => removeInvRow(i)}
+                          className={btnGhost}
+                          onClick={() => removeRow(i)}
                         >
-                          🗑
+                          <ListX color="red" size={48} /> Remove item
                         </Button>
                       </div>
-                    </li>
+                    </div>
                   ))}
-                </ul>
-                <div className="mt-2 flex items-center justify-between">
-                  <div className="flex gap-2">
-                    <Button variant="secondary" onClick={addInvRow}>
-                      + Producto
+
+                  <div className="flex gap-3">
+                    <Button className={btnGhost} onClick={addRow}>
+                      <ListFilterPlus color="#3f7ad9" size={48} /> Producto
                     </Button>
-                    <Button variant="outline" onClick={clearInvRows}>
+                    <Button className={btnGhost} onClick={clearInvRows}>
                       Limpiar
                     </Button>
+                    <Button
+                      className={btnPrimary}
+                      onClick={seedInventory}
+                      disabled={savingInv || !invDraft.every(isRowValid)}
+                    >
+                      {savingInv ? 'Guardando…' : saveMsg ?? 'Guardar'}
+                    </Button>
                   </div>
-                  <Button onClick={seedInventory}>Guardar</Button>
                 </div>
               </CardContent>
             </Card>
@@ -715,31 +1175,84 @@ export default function MonitoringPage() {
             </CardHeader>
             <CardContent className="max-h-[48vh] overflow-auto">
               <table className="w-full text-sm">
-                <thead className="sticky top-0 bg-slate-900/60 text-sky-300">
+                <thead className="sticky top-0 bg-slate-900/70 backdrop-blur text-sky-300 border-b border-slate-800">
                   <tr>
                     <th className="text-left p-2">Producto</th>
+                    <th className="text-left p-2">ID</th>
+                    <th className="text-center p-2">Precio</th>
                     <th className="text-center p-2">Stock</th>
                     <th className="text-center p-2">Reservado</th>
                     <th className="text-center p-2">Actualizado</th>
                   </tr>
                 </thead>
+
                 <tbody>
-                  {inv.map((x) => (
-                    <tr key={x.productId} className="border-t border-slate-800">
-                      <td className="p-2">
-                        <code className="break-all text-slate-200">
-                          {x.productId}
-                        </code>
-                      </td>
-                      <td className="text-center">{x.currentStock}</td>
-                      <td className="text-center">{x.reservedUnits}</td>
-                      <td className="text-center">
-                        {x.updatedAt
-                          ? new Date(x.updatedAt).toLocaleTimeString()
-                          : '-'}
+                  {invList.length === 0 && (
+                    <tr>
+                      <td
+                        colSpan={6}
+                        className="p-6 text-center text-slate-400"
+                      >
+                        Sin productos en inventario.
                       </td>
                     </tr>
-                  ))}
+                  )}
+
+                  {[...invList]
+                    .sort((a: InvItem, b: InvItem) =>
+                      (a.name || a.productId).localeCompare(
+                        b.name || b.productId
+                      )
+                    )
+                    .map((x: InvItem) => {
+                      const low = (x.stock ?? 0) <= 3;
+                      return (
+                        <tr
+                          key={x.productId}
+                          className={cx(
+                            'border-t border-slate-800 transition-colors',
+                            low && 'bg-sky-950/20'
+                          )}
+                        >
+                          <td className="p-2 text-slate-200">
+                            {x.name || x.productId}
+                          </td>
+                          <td className="p-2">
+                            <code className="break-all text-slate-400">
+                              {x.productId}
+                            </code>
+                          </td>
+                          <td className="text-center p-2 text-slate-200">
+                            {money(x.price)}
+                          </td>
+                          <td
+                            className={cx(
+                              'text-center p-2 font-medium',
+                              low ? 'text-sky-300' : 'text-slate-200'
+                            )}
+                            title={low ? 'Stock bajo' : undefined}
+                          >
+                            {x.stock ?? 0}
+                          </td>
+                          <td className="text-center p-2 text-slate-300">
+                            {
+                              x.reserved ??
+                                0 /* <- corregido (antes 'resered') */
+                            }
+                          </td>
+                          <td
+                            className="text-center p-2 text-slate-300"
+                            title={
+                              x.updatedAt
+                                ? new Date(x.updatedAt).toLocaleString()
+                                : ''
+                            }
+                          >
+                            {timeAgo(x.updatedAt)}
+                          </td>
+                        </tr>
+                      );
+                    })}
                 </tbody>
               </table>
             </CardContent>
@@ -785,33 +1298,358 @@ export default function MonitoringPage() {
                   <thead className="sticky top-0 bg-slate-900/60 text-sky-300">
                     <tr>
                       <th className="text-left p-2">Producto</th>
-                      <th className="text-center p-2">Faltantes</th>
+                      <th className="text-center p-2">
+                        Faltantes / Reposición
+                      </th>
                       <th className="text-left p-2">Referencia</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {rep.map((r, i) => (
-                      <tr key={i} className="border-t border-slate-800">
-                        <td className="p-2">
-                          <code className="break-all">{r.productId}</code>
-                        </td>
-                        <td className="text-center">{r.missingUnits}</td>
-                        <td className="p-2">
-                          {r.orderId || ''}
-                          {r.key ? (
-                            <span className="opacity-60">
-                              {' '}
-                              / {r.key.split('/').pop()}
-                            </span>
-                          ) : null}
-                        </td>
-                      </tr>
-                    ))}
+                    {[...rep]
+                      .sort((a, b) => (b.t ?? 0) - (a.t ?? 0))
+                      .map((r, i) => (
+                        <tr key={i} className="border-t border-slate-800">
+                          <td className="p-2">
+                            <code className="break-all">{r.productId}</code>
+                            {/* opcional: mostrar tipo */}
+                            {r.type ? (
+                              <span className="ml-2 text-xs text-slate-400">
+                                ({String(r.type).replaceAll('_', ' ')})
+                              </span>
+                            ) : null}
+                          </td>
+
+                          {/* ⬇️ AQUÍ el cambio */}
+                          <td className="text-center">
+                            {(() => {
+                              const added = (r as any).addedUnits;
+                              const miss =
+                                r.missingUnits ?? (r as any).missingQty ?? 0;
+                              if (added != null && Number(added) > 0) {
+                                return (
+                                  <span className="text-emerald-300 font-medium">
+                                    +{added}
+                                  </span>
+                                );
+                              }
+                              return miss;
+                            })()}
+                          </td>
+
+                          <td className="p-2">
+                            {r.orderId || ''}
+                            {r.key ? (
+                              <span className="opacity-60">
+                                {' '}
+                                / {r.key.split('/').pop()}
+                              </span>
+                            ) : null}
+                          </td>
+                        </tr>
+                      ))}
                   </tbody>
                 </table>
               </div>
             </CardContent>
           </Card>
+        </TabsContent>
+
+        {/* ===== MONITOREO ===== */}
+        <TabsContent value="kpis" className="space-y-4">
+          {/* Cards superiores */}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+            {(() => {
+              const ready = (mx?.queues || [])
+                .filter((q) => !q.name.endsWith('-dlq'))
+                .reduce(
+                  (a, q) => a + Number(q.ApproximateNumberOfMessages ?? 0),
+                  0
+                );
+              const inflight = (mx?.queues || []).reduce(
+                (a, q) =>
+                  a + Number(q.ApproximateNumberOfMessagesNotVisible ?? 0),
+                0
+              );
+              const delayed = (mx?.queues || []).reduce(
+                (a, q) => a + Number(q.ApproximateNumberOfMessagesDelayed ?? 0),
+                0
+              );
+              const dlqReady = (mx?.queues || [])
+                .filter((q) => q.name.endsWith('-dlq'))
+                .reduce(
+                  (a, q) => a + Number(q.ApproximateNumberOfMessages ?? 0),
+                  0
+                );
+
+              const processedOkS3 =
+                (mx?.processed?.fulfillment ?? 0) +
+                (mx?.processed?.analytics ?? 0);
+              const processedStages =
+                (mx?.metricsByTrace?.f_done ?? 0) +
+                (mx?.metricsByTrace?.a_done ?? 0);
+              const errPct = (() => {
+                const base =
+                  (mx?.metricsByTrace?.published ?? 0) || processedStages;
+                const dlqTally =
+                  (mx?.dlqCounts?.fulfill ?? 0) +
+                  (mx?.dlqCounts?.analytics ?? 0) +
+                  (mx?.dlqCounts?.thr ?? 0);
+                return base ? Math.round((dlqTally / base) * 100) : 0;
+              })();
+
+              const cards: [string, string | number][] = [
+                ['Backlog (ready)', ready],
+                ['In-Flight', inflight],
+                ['DLQ (ready)', dlqReady],
+                ['Procesadas OK (S3)', processedOkS3],
+                ['Fulfilled OK (trazas)', mx?.metricsByTrace?.f_done ?? 0],
+                ['Analytics OK (trazas)', mx?.metricsByTrace?.a_done ?? 0],
+                ['Delayed', delayed],
+                ['% errores (estim.)', `${errPct}%`],
+              ];
+              return cards.map(([k, v], i) => (
+                <Card key={i} className="border-slate-800 bg-slate-900/50">
+                  <CardContent className="p-4">
+                    <div className="text-slate-400 text-xs">{k}</div>
+                    <div className="text-2xl font-semibold">{v as any}</div>
+                  </CardContent>
+                </Card>
+              ));
+            })()}
+          </div>
+
+          {/* Tablas de detalle */}
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+            {/* Colas SQS (snapshot) */}
+            <Card className="border-slate-800 bg-slate-900/50">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-slate-200">
+                  Colas — snapshot
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="max-h-[48vh] overflow-auto">
+                <table className="w-full text-sm">
+                  <thead className="sticky top-0 bg-slate-900/60 text-sky-300">
+                    <tr>
+                      <th className="text-left p-2">Queue</th>
+                      <th className="text-center p-2">Ready</th>
+                      <th className="text-center p-2">In-Flight</th>
+                      <th className="text-center p-2">Delayed</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(mx?.queues || []).map((q) => (
+                      <tr key={q.name} className="border-t border-slate-800">
+                        <td className="p-2">
+                          <code>{q.name}</code>
+                        </td>
+                        <td className="text-center">
+                          {q.ApproximateNumberOfMessages ?? 0}
+                        </td>
+                        <td className="text-center">
+                          {q.ApproximateNumberOfMessagesNotVisible ?? 0}
+                        </td>
+                        <td className="text-center">
+                          {q.ApproximateNumberOfMessagesDelayed ?? 0}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </CardContent>
+            </Card>
+
+            {/* KPIs por trazas y artefactos */}
+            <Card className="border-slate-800 bg-slate-900/50">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-slate-200">
+                  Trazas & artefactos
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="grid grid-cols-2 gap-4">
+                <div>
+                  <div className="text-slate-400 text-sm mb-2">
+                    Trazas (conteo por archivos)
+                  </div>
+                  <table className="w-full text-sm">
+                    <tbody>
+                      <tr>
+                        <td className="p-1">00-published</td>
+                        <td className="p-1 text-right">
+                          {mx?.metricsByTrace?.published ?? 0}
+                        </td>
+                      </tr>
+                      <tr>
+                        <td className="p-1">10-fulfillment-received</td>
+                        <td className="p-1 text-right">
+                          {mx?.metricsByTrace?.f_recv ?? 0}
+                        </td>
+                      </tr>
+                      <tr>
+                        <td className="p-1">20-fulfillment-processed</td>
+                        <td className="p-1 text-right">
+                          {mx?.metricsByTrace?.f_done ?? 0}
+                        </td>
+                      </tr>
+                      <tr>
+                        <td className="p-1">11-analytics-received</td>
+                        <td className="p-1 text-right">
+                          {mx?.metricsByTrace?.a_recv ?? 0}
+                        </td>
+                      </tr>
+                      <tr>
+                        <td className="p-1">21-analytics-processed</td>
+                        <td className="p-1 text-right">
+                          {mx?.metricsByTrace?.a_done ?? 0}
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div>
+                  <div className="text-slate-400 text-sm mb-2">
+                    Procesados (artefactos S3)
+                  </div>
+                  <table className="w-full text-sm">
+                    <tbody>
+                      <tr>
+                        <td className="p-1">Orders/</td>
+                        <td className="p-1 text-right">
+                          {mx?.processed?.fulfillment ?? 0}
+                        </td>
+                      </tr>
+                      <tr>
+                        <td className="p-1">Analytics/</td>
+                        <td className="p-1 text-right">
+                          {mx?.processed?.analytics ?? 0}
+                        </td>
+                      </tr>
+                      <tr className="border-t border-slate-800">
+                        <td className="p-1 font-medium">Total</td>
+                        <td className="p-1 text-right font-medium">
+                          {(mx?.processed?.fulfillment ?? 0) +
+                            (mx?.processed?.analytics ?? 0)}
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+
+          {/* DLQ y CloudWatch */}
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+            {/* DLQ totales */}
+            <Card className="border-slate-800 bg-slate-900/50">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-slate-200">
+                  DLQ — pendientes
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <table className="w-full text-sm">
+                  <tbody>
+                    <tr>
+                      <td className="p-1">fulfill-dlq</td>
+                      <td className="p-1 text-right">
+                        {mx?.dlqCounts?.fulfill ?? 0}
+                      </td>
+                    </tr>
+                    <tr>
+                      <td className="p-1">analytics-dlq</td>
+                      <td className="p-1 text-right">
+                        {mx?.dlqCounts?.analytics ?? 0}
+                      </td>
+                    </tr>
+                    <tr>
+                      <td className="p-1">thr-dlq</td>
+                      <td className="p-1 text-right">
+                        {mx?.dlqCounts?.thr ?? 0}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </CardContent>
+            </Card>
+
+            {/* CloudWatch (si disponible) */}
+            <Card className="border-slate-800 bg-slate-900/50">
+              <CardHeader className="pb-2 flex items-center justify-between">
+                <CardTitle className="text-slate-200">
+                  CloudWatch (última hora)
+                </CardTitle>
+                <div className="flex items-center gap-2">
+                  <select
+                    className={input}
+                    value={cwSel}
+                    onChange={(e) => {
+                      setCwSel(e.target.value);
+                      void loadCw(e.target.value);
+                    }}
+                  >
+                    {['demo-fulfill-sqs', 'demo-analytics-sqs', 'demo-thr'].map(
+                      (q) => (
+                        <option key={q} value={q}>
+                          {q}
+                        </option>
+                      )
+                    )}
+                  </select>
+                  <Button className={btnPrimary} onClick={() => loadCw(cwSel)}>
+                    Refrescar
+                  </Button>
+                </div>
+              </CardHeader>
+              <CardContent>
+                {!cwRows ? (
+                  <div className="text-sm text-slate-400">
+                    No disponible (LocalStack suele no exponer métricas de
+                    CloudWatch).
+                  </div>
+                ) : (
+                  <table className="w-full text-sm">
+                    <thead className="sticky top-0 bg-slate-900/60 text-sky-300">
+                      <tr>
+                        <th className="text-left p-2">Métrica</th>
+                        <th className="text-right p-2">Sum/Average</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {cwRows.map((r: any) => (
+                        <tr key={r.Id} className="border-t border-slate-800">
+                          <td className="p-2">{r.Id}</td>
+                          <td className="p-2 text-right">
+                            {(
+                              r.Values?.reduce(
+                                (a: number, b: number) => a + b,
+                                0
+                              ) ?? 0
+                            ).toFixed(0)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+                <div className="mt-2 text-xs text-slate-500">
+                  En AWS real: <code>sent/recv/del</code> ≈
+                  encolados/recibidos/eliminados; <code>vis/nvis</code> ≈
+                  mensajes visibles / no visibles.
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <Button variant="secondary" onClick={() => loadMetricsAll()}>
+              Refrescar KPIs
+            </Button>
+            <div className="text-xs text-slate-500">
+              Fuente: snapshot SQS + conteos por archivos en S3 (
+              <code>{mx?.bucket || '-'}</code>).
+            </div>
+          </div>
         </TabsContent>
 
         {/* ===== MENSAJERÍA ===== */}
@@ -833,29 +1671,52 @@ export default function MonitoringPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {queues.map((q) => (
-                      <tr key={q.name} className="border-t border-slate-800">
-                        <td className="p-2">
-                          <code className="break-all">{q.name}</code>
-                        </td>
-                        <td className="text-center p-2">
-                          {q.ApproximateNumberOfMessages || 0}
-                        </td>
-                        <td className="text-center p-2">
-                          {q.ApproximateNumberOfMessagesNotVisible || 0}
-                        </td>
-                        <td className="text-center p-2">
-                          {q.ApproximateNumberOfMessagesDelayed || 0}
-                        </td>
-                      </tr>
-                    ))}
+                    {queues.map((q) => {
+                      const isFocus = /^(demo-thr|demo-thr-dlq)$/i.test(q.name); // 💙 objetivo
+                      const changed = !!qChanged[q.name];
+                      return (
+                        <tr
+                          key={q.name}
+                          className={cx(
+                            'border-t border-slate-800 transition',
+                            isFocus && 'bg-sky-950/20', // fondo azulado
+                            changed && 'animate-pulse ring-1 ring-sky-500/40' // pulso cuando cambian números
+                          )}
+                        >
+                          <td className="p-2">
+                            <code className="break-all">{q.name}</code>
+                          </td>
+                          <td className="text-center p-2">
+                            {q.ApproximateNumberOfMessages || 0}
+                          </td>
+                          <td className="text-center p-2">
+                            {q.ApproximateNumberOfMessagesNotVisible || 0}
+                          </td>
+                          <td className="text-center p-2">
+                            {q.ApproximateNumberOfMessagesDelayed || 0}
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </CardContent>
-              <CardFooter className="px-6 pb-4">
-                <Button variant="secondary" onClick={() => refresh()}>
-                  Refrescar
+              <CardFooter className="px-6 pb-4 flex items-center gap-3">
+                <Button
+                  variant="secondary"
+                  onClick={() => refreshQueues()}
+                  disabled={qLoading}
+                >
+                  {qLoading ? 'Actualizando…' : 'Refrescar'}
                 </Button>
+                <label className="flex items-center gap-2 text-sm text-slate-300 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={qLive}
+                    onChange={(e) => setQLive(e.target.checked)}
+                  />
+                  Live (1.5s)
+                </label>
               </CardFooter>
             </Card>
 
@@ -889,6 +1750,61 @@ export default function MonitoringPage() {
                 >
                   Reproducir demo en Visualizer
                 </Button>
+
+                <Button
+                  variant="outline"
+                  onClick={async () => {
+                    setBursting(true);
+                    try {
+                      const r = await fetchSafe<{ ok: boolean; sent: number }>(
+                        `${API}/throttle/burst`,
+                        {
+                          method: 'POST',
+                          headers: { 'content-type': 'application/json' },
+                          body: JSON.stringify({ count: 120 }),
+                        }
+                      );
+                      setLastBurst(r?.sent ?? 120);
+                      setQLive(true); // 🔴 activa live para que lo veas moverse
+                      await refreshQueues(); // pulso inicial inmediato
+                    } finally {
+                      setBursting(false);
+                    }
+                  }}
+                  disabled={bursting}
+                >
+                  {bursting
+                    ? 'Enviando burst…'
+                    : 'Stress test (throttling → DLQ)'}
+                </Button>
+
+                {lastBurst ? (
+                  <div className="text-xs text-slate-400 mt-2">
+                    Enviados {lastBurst} a <code>demo-thr</code>. Observa en{' '}
+                    <b>Colas SQS</b>:
+                    <ul className="list-disc ml-5">
+                      <li>
+                        Sube <code>demo-thr</code> (Ready).
+                      </li>
+                      <li>
+                        Con concurrency=1 y VisibilityTimeout=6s, tras ~20–30s
+                        verás crecer <code>demo-thr-dlq</code>.
+                      </li>
+                    </ul>
+                  </div>
+                ) : null}
+              </CardContent>
+            </Card>
+
+            {/* DLQ — inspección y reintento */}
+            <Card className="border-slate-800 bg-slate-900/50">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-slate-200">
+                  DLQ — inspección
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <DlqMini />
               </CardContent>
             </Card>
           </div>
@@ -896,7 +1812,7 @@ export default function MonitoringPage() {
 
         {/* ===== ALMACENAMIENTO ===== */}
         <TabsContent value="storage" className="space-y-4">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <Card className="border-slate-800 bg-slate-900/50">
               <CardHeader className="pb-2">
                 <CardTitle className="text-slate-200">S3 — Orders</CardTitle>
@@ -933,6 +1849,25 @@ export default function MonitoringPage() {
                 ))}
               </CardContent>
             </Card>
+
+            <Card className="border-slate-800 bg-slate-900/50">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-slate-200">S3 — Shipping</CardTitle>
+              </CardHeader>
+              <CardContent className="max-h-[60vh] overflow-auto">
+                {s3Shipping.slice(0, 100).map((k) => (
+                  <div key={k} className="break-all">
+                    <a
+                      className="underline"
+                      href={`${API}/file?key=${encodeURIComponent(k)}`}
+                      target="_blank"
+                    >
+                      {k}
+                    </a>
+                  </div>
+                ))}
+              </CardContent>
+            </Card>
           </div>
         </TabsContent>
 
@@ -950,10 +1885,13 @@ export default function MonitoringPage() {
             </CardHeader>
             <CardContent className="max-h-[70vh] overflow-auto">
               {detail ? (
-                <TraceAccordion
-                  detailHtml={detail}
-                  cidToHighlight={cidQuery || cidBadge}
-                />
+                <>
+                  <TraceTimeline detailHtml={detail} />
+                  <TraceAccordion
+                    detailHtml={detail}
+                    cidToHighlight={cidQuery || cidBadge}
+                  />
+                </>
               ) : (
                 <em className="text-slate-400">Selecciona “Ver”.</em>
               )}
